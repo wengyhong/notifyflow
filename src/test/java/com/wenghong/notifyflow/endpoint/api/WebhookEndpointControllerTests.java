@@ -1,0 +1,461 @@
+package com.wenghong.notifyflow.endpoint.api;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import com.wenghong.notifyflow.endpoint.application.WebhookEndpointService;
+import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+@WebMvcTest(WebhookEndpointController.class)
+class WebhookEndpointControllerTests {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @MockitoBean
+    private WebhookEndpointService service;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void changeEnabledReturnsUpdatedEndpoint(boolean enabled) throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
+        Instant updatedAt = createdAt.plusSeconds(60);
+        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
+        when(endpoint.getId()).thenReturn(id);
+        when(endpoint.getName()).thenReturn("Orders");
+        when(endpoint.getUrl()).thenReturn("https://example.com/webhooks");
+        when(endpoint.isEnabled()).thenReturn(enabled);
+        when(endpoint.getCreatedAt()).thenReturn(createdAt);
+        when(endpoint.getUpdatedAt()).thenReturn(updatedAt);
+        when(service.changeEnabled(id, enabled)).thenReturn(Optional.of(endpoint));
+
+        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":%s}".formatted(enabled)))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.name").value("Orders"))
+                .andExpect(jsonPath("$.url").value("https://example.com/webhooks"))
+                .andExpect(jsonPath("$.enabled").value(enabled))
+                .andExpect(jsonPath("$.createdAt").value(createdAt.toString()))
+                .andExpect(jsonPath("$.updatedAt").value(updatedAt.toString()));
+
+        verify(service).changeEnabled(id, enabled);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void changeEnabledReturnsNotFoundForMissingEndpoint(boolean enabled) throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        when(service.changeEnabled(id, enabled)).thenReturn(Optional.empty());
+
+        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":%s}".formatted(enabled)))
+                .andExpect(status().isNotFound())
+                .andExpect(content().string(""));
+
+        verify(service).changeEnabled(id, enabled);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"enabled\":null}", "{", "", "null",
+            "{\"enabled\":{}}", "{\"enabled\":\"invalid\"}"})
+    void changeEnabledRejectsInvalidBodyWithoutCallingService(String requestBody) throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+
+        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void changeEnabledRejectsMalformedUuid() throws Exception {
+        mockMvc.perform(patch("/api/endpoints/{id}/enabled", "not-a-uuid")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":false}"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void changeEnabledRejectsUnsupportedContentType() throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+
+        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id)
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("false"))
+                .andExpect(status().isUnsupportedMediaType());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void findAllUsesDefaultPaginationAndReturnsEmptyPage() throws Exception {
+        PageRequest pageable = PageRequest.of(
+                0, 20, Sort.by(Sort.Direction.DESC, "createdAt", "id"));
+        when(service.findAll(pageable)).thenReturn(Page.empty(pageable));
+
+        mockMvc.perform(get("/api/endpoints"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.content").isArray())
+                .andExpect(jsonPath("$.content").isEmpty())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.totalElements").value(0))
+                .andExpect(jsonPath("$.totalPages").value(0));
+
+        verify(service).findAll(pageable);
+    }
+
+    @Test
+    void findAllBindsExplicitPaginationAndSortAndMapsEndpointContent() throws Exception {
+        PageRequest pageable = PageRequest.of(
+                1, 2, Sort.by("name").ascending().and(Sort.by("id").ascending()));
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant now = Instant.parse("2026-10-28T00:00:00Z");
+        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
+        when(endpoint.getId()).thenReturn(id);
+        when(endpoint.getName()).thenReturn("Orders");
+        when(endpoint.getUrl()).thenReturn("https://example.com/webhooks");
+        when(endpoint.isEnabled()).thenReturn(true);
+        when(endpoint.getCreatedAt()).thenReturn(now);
+        when(endpoint.getUpdatedAt()).thenReturn(now);
+        UUID secondId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4ace");
+        WebhookEndpoint secondEndpoint = mock(WebhookEndpoint.class);
+        when(secondEndpoint.getId()).thenReturn(secondId);
+        when(secondEndpoint.getName()).thenReturn("Payments");
+        when(secondEndpoint.getUrl()).thenReturn("https://example.com/payments");
+        when(secondEndpoint.isEnabled()).thenReturn(false);
+        when(secondEndpoint.getCreatedAt()).thenReturn(now);
+        when(secondEndpoint.getUpdatedAt()).thenReturn(now);
+        when(service.findAll(pageable))
+                .thenReturn(new PageImpl<>(List.of(endpoint, secondEndpoint), pageable, 5));
+
+        mockMvc.perform(get("/api/endpoints")
+                        .param("page", "1")
+                        .param("size", "2")
+                        .param("sort", "name,asc", "id,asc"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.content.length()").value(2))
+                .andExpect(jsonPath("$.content[0].id").value(id.toString()))
+                .andExpect(jsonPath("$.content[0].name").value("Orders"))
+                .andExpect(jsonPath("$.content[0].url").value("https://example.com/webhooks"))
+                .andExpect(jsonPath("$.content[0].enabled").value(true))
+                .andExpect(jsonPath("$.content[0].createdAt").value(now.toString()))
+                .andExpect(jsonPath("$.content[0].updatedAt").value(now.toString()))
+                .andExpect(jsonPath("$.content[1].id").value(secondId.toString()))
+                .andExpect(jsonPath("$.content[1].name").value("Payments"))
+                .andExpect(jsonPath("$.content[1].url").value("https://example.com/payments"))
+                .andExpect(jsonPath("$.content[1].enabled").value(false))
+                .andExpect(jsonPath("$.content[1].createdAt").value(now.toString()))
+                .andExpect(jsonPath("$.content[1].updatedAt").value(now.toString()))
+                .andExpect(jsonPath("$.page").value(1))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalElements").value(5))
+                .andExpect(jsonPath("$.totalPages").value(3));
+
+        verify(service).findAll(pageable);
+    }
+
+    @Test
+    void findAllReturnsEmptyContentBeyondLastPageWhilePreservingTotals() throws Exception {
+        PageRequest pageable = PageRequest.of(
+                5, 2, Sort.by(Sort.Direction.DESC, "createdAt", "id"));
+        when(service.findAll(pageable))
+                .thenReturn(new PageImpl<>(List.of(), pageable, 3));
+
+        mockMvc.perform(get("/api/endpoints").param("page", "5").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").isArray())
+                .andExpect(jsonPath("$.content").isEmpty())
+                .andExpect(jsonPath("$.page").value(5))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalElements").value(3))
+                .andExpect(jsonPath("$.totalPages").value(2));
+
+        verify(service).findAll(pageable);
+    }
+
+    @Test
+    void findByIdReturnsEndpointResponseWhenFound() throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant now = Instant.parse("2026-10-28T00:00:00Z");
+        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
+        when(endpoint.getId()).thenReturn(id);
+        when(endpoint.getName()).thenReturn("Orders");
+        when(endpoint.getUrl()).thenReturn("https://example.com/webhooks");
+        when(endpoint.isEnabled()).thenReturn(true);
+        when(endpoint.getCreatedAt()).thenReturn(now);
+        when(endpoint.getUpdatedAt()).thenReturn(now);
+        when(service.findById(id)).thenReturn(Optional.of(endpoint));
+
+        mockMvc.perform(get("/api/endpoints/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.name").value("Orders"))
+                .andExpect(jsonPath("$.url").value("https://example.com/webhooks"))
+                .andExpect(jsonPath("$.enabled").value(true))
+                .andExpect(jsonPath("$.createdAt").value(now.toString()))
+                .andExpect(jsonPath("$.updatedAt").value(now.toString()));
+
+        verify(service).findById(id);
+    }
+
+    @Test
+    void findByIdReturnsNotFoundWhenEndpointDoesNotExist() throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        when(service.findById(id)).thenReturn(Optional.empty());
+
+        mockMvc.perform(get("/api/endpoints/{id}", id))
+                .andExpect(status().isNotFound())
+                .andExpect(content().string(""));
+
+        verify(service).findById(id);
+    }
+
+    @Test
+    void findByIdRejectsMalformedUuid() throws Exception {
+        mockMvc.perform(get("/api/endpoints/{id}", "not-a-uuid"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void createReturnsCreatedWithEndpointResponse() throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant now = Instant.parse("2026-10-28T00:00:00Z");
+        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
+        when(endpoint.getId()).thenReturn(id);
+        when(endpoint.getName()).thenReturn("Orders");
+        when(endpoint.getUrl()).thenReturn("https://example.com/webhooks");
+        when(endpoint.isEnabled()).thenReturn(true);
+        when(endpoint.getCreatedAt()).thenReturn(now);
+        when(endpoint.getUpdatedAt()).thenReturn(now);
+        when(service.create("Orders", "https://example.com/webhooks"))
+                .thenReturn(endpoint);
+
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "Orders",
+                                  "url": "https://example.com/webhooks"
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.name").value("Orders"))
+                .andExpect(jsonPath("$.url").value("https://example.com/webhooks"))
+                .andExpect(jsonPath("$.enabled").value(true))
+                .andExpect(jsonPath("$.createdAt").value(now.toString()))
+                .andExpect(jsonPath("$.updatedAt").value(now.toString()));
+
+        verify(service).create("Orders", "https://example.com/webhooks");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "not-a-url",
+            "/relative/path",
+            "ftp://example.com/webhook",
+            "https://"
+    })
+    void createRejectsInvalidWebhookUrl(String url) throws Exception {
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "Orders",
+                                  "url": "%s"
+                                }
+                                """.formatted(url)))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://example.com/webhooks",
+            "https://example.com/webhooks"
+    })
+    void createAcceptsHttpAndHttpsWebhookUrls(String url) throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant now = Instant.parse("2026-10-28T00:00:00Z");
+        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
+        when(endpoint.getId()).thenReturn(id);
+        when(endpoint.getName()).thenReturn("Orders");
+        when(endpoint.getUrl()).thenReturn(url);
+        when(endpoint.isEnabled()).thenReturn(true);
+        when(endpoint.getCreatedAt()).thenReturn(now);
+        when(endpoint.getUpdatedAt()).thenReturn(now);
+        when(service.create("Orders", url)).thenReturn(endpoint);
+
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "Orders",
+                                  "url": "%s"
+                                }
+                                """.formatted(url)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.url").value(url));
+
+        verify(service).create("Orders", url);
+    }
+
+    @Test
+    void createRejectsBlankName() throws Exception {
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "   ",
+                                  "url": "https://example.com/webhooks"
+                                }
+                                """))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void createRejectsBlankUrl() throws Exception {
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "Orders",
+                                  "url": "   "
+                                }
+                                """))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void createRejectsNameLongerThan100Characters() throws Exception {
+        String name = "x".repeat(101);
+
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "%s",
+                                  "url": "https://example.com/webhooks"
+                                }
+                                """.formatted(name)))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"url\":\"https://example.com/webhooks\"}",
+            "{\"name\":null,\"url\":\"https://example.com/webhooks\"}",
+            "{\"name\":\"\",\"url\":\"https://example.com/webhooks\"}",
+            "{\"name\":\"Orders\"}",
+            "{\"name\":\"Orders\",\"url\":null}",
+            "{\"name\":\"Orders\",\"url\":\"\"}"
+    })
+    void createRejectsMissingNullOrEmptyRequiredFields(String requestBody) throws Exception {
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void createAcceptsNameExactly100CharactersLong() throws Exception {
+        String name = "x".repeat(100);
+        String url = "https://example.com/webhooks";
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant now = Instant.parse("2026-10-28T00:00:00Z");
+        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
+        when(endpoint.getId()).thenReturn(id);
+        when(endpoint.getName()).thenReturn(name);
+        when(endpoint.getUrl()).thenReturn(url);
+        when(endpoint.isEnabled()).thenReturn(true);
+        when(endpoint.getCreatedAt()).thenReturn(now);
+        when(endpoint.getUpdatedAt()).thenReturn(now);
+        when(service.create(name, url)).thenReturn(endpoint);
+
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "%s",
+                                  "url": "https://example.com/webhooks"
+                                }
+                                """.formatted(name)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.name").value(name));
+
+        verify(service).create(name, url);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{", "", "null"})
+    void createRejectsMalformedOrMissingBody(String requestBody) throws Exception {
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void createRejectsUnsupportedContentType() throws Exception {
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("Orders"))
+                .andExpect(status().isUnsupportedMediaType());
+
+        verifyNoInteractions(service);
+    }
+}
