@@ -1,0 +1,224 @@
+package com.wenghong.notifyflow.event.api;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import com.wenghong.notifyflow.event.application.EventIngestionService;
+import com.wenghong.notifyflow.event.application.IdempotencyConflictException;
+import com.wenghong.notifyflow.event.domain.Event;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+@WebMvcTest(EventController.class)
+class EventControllerTests {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @MockitoBean
+    private EventIngestionService service;
+
+    @Test
+    void ingestAcceptsMaximumTypeAndIdempotencyKeyLengths() throws Exception {
+        String type = "t".repeat(100);
+        String key = "k".repeat(200);
+        JsonNode payload = JsonMapper.builder().build().readTree("{}");
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant createdAt = Instant.parse("2026-10-30T00:00:00Z");
+        Event accepted = mock(Event.class);
+        when(accepted.getId()).thenReturn(id);
+        when(accepted.getEventType()).thenReturn(type);
+        when(accepted.getCreatedAt()).thenReturn(createdAt);
+        when(service.ingest(type, payload, key)).thenReturn(accepted);
+
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"%s\",\"payload\":{}}".formatted(type)))
+                .andExpect(status().isAccepted())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.type").value(type))
+                .andExpect(jsonPath("$.createdAt").value(createdAt.toString()));
+
+        verify(service).ingest(type, payload, key);
+    }
+
+    @Test
+    void ingestRejectsEventTypeLongerThan100Characters() throws Exception {
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", "order-128-confirmed")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"%s\",\"payload\":{}}".formatted("t".repeat(101))))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{", "", "null"})
+    void ingestRejectsMalformedOrMissingBody(String requestBody) throws Exception {
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", "order-128-confirmed")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void ingestRejectsUnsupportedContentType() throws Exception {
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", "order-128-confirmed")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("order.confirmed"))
+                .andExpect(status().isUnsupportedMediaType());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void ingestReturnsConflictForReusedKeyWithDifferentData() throws Exception {
+        String key = "order-128-confirmed";
+        JsonNode payload = JsonMapper.builder().build().readTree("{\"orderNumber\":\"999\"}");
+        when(service.ingest("order.confirmed", payload, key))
+                .thenThrow(new IdempotencyConflictException());
+
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "type": "order.confirmed",
+                                  "payload": {"orderNumber":"999"}
+                                }
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.title").value("Conflict"))
+                .andExpect(jsonPath("$.detail")
+                        .value("The idempotency key has already been used for a different event."));
+
+        verify(service).ingest("order.confirmed", payload, key);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"payload\":{}}",
+            "{\"type\":\"\",\"payload\":{}}",
+            "{\"type\":\"   \",\"payload\":{}}",
+            "{\"type\":\"order.confirmed\"}"
+    })
+    void ingestRejectsMissingOrBlankRequiredBodyFields(String requestBody) throws Exception {
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", "order-128-confirmed")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void ingestRejectsBlankIdempotencyKey(String key) throws Exception {
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "type": "order.confirmed",
+                                  "payload": {"orderNumber":"128"}
+                                }
+                                """))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void ingestRejectsIdempotencyKeyLongerThan200Characters() throws Exception {
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", "x".repeat(201))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "type": "order.confirmed",
+                                  "payload": {"orderNumber":"128"}
+                                }
+                                """))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void ingestRejectsMissingIdempotencyKey() throws Exception {
+        mockMvc.perform(post("/api/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "type": "order.confirmed",
+                                  "payload": {"orderNumber":"128"}
+                                }
+                                """))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void ingestReturnsAcceptedEventResponse() throws Exception {
+        UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
+        Instant createdAt = Instant.parse("2026-10-30T00:00:00Z");
+        String key = "order-128-confirmed";
+        JsonNode payload = JsonMapper.builder().build().readTree("""
+                {"orderNumber":"128","items":[{"sku":"A","quantity":2}]}
+                """);
+        Event accepted = mock(Event.class);
+        when(accepted.getId()).thenReturn(id);
+        when(accepted.getEventType()).thenReturn("order.confirmed");
+        when(accepted.getCreatedAt()).thenReturn(createdAt);
+        when(service.ingest("order.confirmed", payload, key)).thenReturn(accepted);
+
+        mockMvc.perform(post("/api/events")
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "type": "order.confirmed",
+                                  "payload": {
+                                    "orderNumber": "128",
+                                    "items": [{"sku":"A","quantity":2}]
+                                  }
+                                }
+                                """))
+                .andExpect(status().isAccepted())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.type").value("order.confirmed"))
+                .andExpect(jsonPath("$.createdAt").value(createdAt.toString()))
+                .andExpect(jsonPath("$.payload").doesNotExist());
+
+        verify(service).ingest("order.confirmed", payload, key);
+    }
+}

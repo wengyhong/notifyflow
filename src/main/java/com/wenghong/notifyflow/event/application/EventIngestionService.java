@@ -1,0 +1,123 @@
+package com.wenghong.notifyflow.event.application;
+
+import java.time.Clock;
+import java.time.Instant;
+
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import com.wenghong.notifyflow.delivery.domain.Delivery;
+import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
+
+import com.wenghong.notifyflow.endpoint.persistence.WebhookSubscriptionRepository;
+import com.wenghong.notifyflow.event.domain.Event;
+import com.wenghong.notifyflow.event.persistence.EventRepository;
+
+import tools.jackson.databind.JsonNode;
+import org.springframework.dao.DataIntegrityViolationException;
+
+@Service
+public class EventIngestionService {
+
+    private EventRepository events;
+    private WebhookSubscriptionRepository subscriptions;
+    private DeliveryRepository deliveries;
+    private Clock clock;
+    private TransactionTemplate transactions;
+
+    public EventIngestionService(EventRepository events, WebhookSubscriptionRepository subscriptions,
+            DeliveryRepository deliveries, Clock clock, TransactionTemplate transactions) {
+        this.events = events;
+        this.subscriptions = subscriptions;
+        this.deliveries = deliveries;
+        this.clock = clock;
+        this.transactions = transactions;
+    }
+
+    // private Event createEventAndDeliveries(
+    // String eventType, JsonNode payload, String idempotencyKey) {
+
+    // Instant now = Instant.now(clock);
+
+    // Event event = events.saveAndFlush(
+    // new Event(eventType, payload, idempotencyKey, now));
+
+    // List<WebhookSubscription> matches =
+    // subscriptions.findAllByEventTypeAndEndpointEnabledTrue(eventType);
+
+    // List<Delivery> pendingDeliveries = matches.stream()
+    // .map(subscription ->
+    // new Delivery(event, subscription.getEndpoint(), now))
+    // .toList();
+
+    // deliveries.saveAll(pendingDeliveries);
+
+    // return event;
+    // }
+
+    private Event createEventAndDeliveries(String eventType, JsonNode payload, String idempotencyKey) {
+        Instant now = Instant.now(clock);
+
+        Event event =
+
+                events.saveAndFlush(new Event(eventType, payload, idempotencyKey, now));
+
+        deliveries.saveAll(subscriptions.findAllByEventTypeAndEndpointEnabledTrue(eventType).stream().map(sub -> {
+
+            return new Delivery(event, sub.getEndpoint(), now);
+        }).toList());
+
+        return event;
+
+    }
+
+    public Event ingest(String eventType, JsonNode payload, String idempotencyKey) {
+
+        return events.findByIdempotencyKey(idempotencyKey).map(exist -> reuseExistingEvent(exist, eventType, payload))
+                .orElseGet(() -> createOrReuseAfterRace(eventType, payload, idempotencyKey));
+
+    }
+
+    private Event reuseExistingEvent(Event existing, String eventType, JsonNode payload) {
+        if (!existing.getEventType().equals(eventType) || !existing.getPayload().equals(payload)) {
+            throw new IdempotencyConflictException();
+        }
+
+        return existing;
+    }
+
+    private boolean isIdempotencyKeyViolation(Throwable error) {
+        Throwable current = error;
+
+        while (current != null) {
+            if (current instanceof ConstraintViolationException violation
+                    && "uq_events_idempotency_key"
+                            .equals(violation.getConstraintName())) {
+                return true;
+            }
+
+            current = current.getCause();
+
+        }
+
+        return false;
+    }
+
+    private Event createOrReuseAfterRace(
+            String eventType, JsonNode payload, String idempotencyKey) {
+        try {
+            return transactions.execute(status ->
+        createEventAndDeliveries(eventType, payload, idempotencyKey));
+
+        } catch (DataIntegrityViolationException error) {
+            if (!isIdempotencyKeyViolation(error)) {
+                throw error;
+            }
+
+            return events.findByIdempotencyKey(idempotencyKey)
+                    .map(exist -> reuseExistingEvent(exist, eventType, payload)).orElseThrow(() -> error);
+
+        }
+    }
+}

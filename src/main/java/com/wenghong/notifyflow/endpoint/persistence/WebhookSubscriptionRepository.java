@@ -1,0 +1,13 @@
+package com.wenghong.notifyflow.endpoint.persistence;
+
+import java.util.List;
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import com.wenghong.notifyflow.endpoint.domain.WebhookSubscription;
+
+public interface WebhookSubscriptionRepository extends JpaRepository<WebhookSubscription, UUID>{
+
+    List<WebhookSubscription> findAllByEventTypeAndEndpointEnabledTrue(String eventType);
+}
