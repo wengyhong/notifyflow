@@ -70,4 +70,35 @@ public class Delivery {
         return endpoint;
     }
 
+    public boolean tryStartProcessing()
+    {
+        if(status != DeliveryStatus.PENDING)
+            return false;
+
+        status = DeliveryStatus.PROCESSING;
+
+        return true;
+    }
+
+    public void markDelivered()
+    {
+        if(status != DeliveryStatus.PROCESSING)
+        {
+            throw new IllegalStateException("Only a processing delivery can be marked delivered.");
+        }
+
+        status = DeliveryStatus.DELIVERED;
+    }
+
+    public void markFailed()
+    {
+        if(status != DeliveryStatus.PROCESSING)
+        {
+            throw new IllegalStateException("Only a processing delivery can be marked failed.");
+        }
+
+        status = DeliveryStatus.FAILED;
+
+    }
+
 }

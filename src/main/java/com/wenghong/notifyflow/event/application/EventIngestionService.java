@@ -7,6 +7,7 @@ import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.wenghong.notifyflow.delivery.application.DeliveryCreatedEvent;
 import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 
@@ -15,11 +16,14 @@ import com.wenghong.notifyflow.event.domain.Event;
 import com.wenghong.notifyflow.event.persistence.EventRepository;
 
 import tools.jackson.databind.JsonNode;
+
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 
 @Service
 public class EventIngestionService {
 
+    private final ApplicationEventPublisher eventPublisher;
     private EventRepository events;
     private WebhookSubscriptionRepository subscriptions;
     private DeliveryRepository deliveries;
@@ -27,12 +31,14 @@ public class EventIngestionService {
     private TransactionTemplate transactions;
 
     public EventIngestionService(EventRepository events, WebhookSubscriptionRepository subscriptions,
-            DeliveryRepository deliveries, Clock clock, TransactionTemplate transactions) {
+            DeliveryRepository deliveries, Clock clock, TransactionTemplate transactions,
+            ApplicationEventPublisher eventPublisher) {
         this.events = events;
         this.subscriptions = subscriptions;
         this.deliveries = deliveries;
         this.clock = clock;
         this.transactions = transactions;
+        this.eventPublisher = eventPublisher;
     }
 
     // private Event createEventAndDeliveries(
@@ -63,10 +69,14 @@ public class EventIngestionService {
 
                 events.saveAndFlush(new Event(eventType, payload, idempotencyKey, now));
 
-        deliveries.saveAll(subscriptions.findAllByEventTypeAndEndpointEnabledTrue(eventType).stream().map(sub -> {
+        var pendingDeliveries = subscriptions.findAllByEventTypeAndEndpointEnabledTrue(eventType).stream().map(sub -> {
 
             return new Delivery(event, sub.getEndpoint(), now);
-        }).toList());
+        }).toList();
+
+        var savedDeliveries = deliveries.saveAll(pendingDeliveries);
+
+        savedDeliveries.forEach(delivery -> eventPublisher.publishEvent(new DeliveryCreatedEvent(delivery.getId())));
 
         return event;
 
@@ -107,8 +117,7 @@ public class EventIngestionService {
     private Event createOrReuseAfterRace(
             String eventType, JsonNode payload, String idempotencyKey) {
         try {
-            return transactions.execute(status ->
-        createEventAndDeliveries(eventType, payload, idempotencyKey));
+            return transactions.execute(status -> createEventAndDeliveries(eventType, payload, idempotencyKey));
 
         } catch (DataIntegrityViolationException error) {
             if (!isIdempotencyKeyViolation(error)) {
