@@ -1,6 +1,7 @@
 package com.wenghong.notifyflow.delivery.domain;
 
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
@@ -47,6 +48,10 @@ public class Delivery {
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
+
+    @Column (name = "next_attempt_at")
+    private Instant nextAttemptAt;
+
 
     public DeliveryStatus getStatus() {
         return status;
@@ -101,4 +106,34 @@ public class Delivery {
 
     }
 
+    public Instant getNextAttemptAt() {
+        return nextAttemptAt;
+    }
+
+    public void scheduleRetry(Instant nextAttemptAt)
+    {
+        if(status != DeliveryStatus.PROCESSING)
+        {
+            throw new IllegalStateException("Only processing can retry");
+        }
+
+        this.nextAttemptAt = Objects.requireNonNull(nextAttemptAt);
+        status = DeliveryStatus.RETRY_SCHEDULED;
+    }
+
+    public boolean tryStartRetry(Instant now)
+    {
+        Objects.requireNonNull(now);
+
+        if(status != DeliveryStatus.RETRY_SCHEDULED)
+            return false;
+
+        if(nextAttemptAt.isAfter(now))
+            return false;
+
+        status = DeliveryStatus.PROCESSING;
+        nextAttemptAt = null;
+        return true;
+    }
 }
+

@@ -11,10 +11,125 @@ import tools.jackson.databind.json.JsonMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DeliveryTests {
+
+    @Test
+    void overdueRetryStartsOnlyOnce() {
+        Delivery delivery = newDelivery();
+        delivery.tryStartProcessing();
+        Instant retryAt = Instant.parse("2026-11-02T00:01:00Z");
+        delivery.scheduleRetry(retryAt);
+
+        assertTrue(delivery.tryStartRetry(retryAt.plusSeconds(1)));
+        assertFalse(delivery.tryStartRetry(retryAt.plusSeconds(2)));
+        assertEquals(DeliveryStatus.PROCESSING, delivery.getStatus());
+        assertNull(delivery.getNextAttemptAt());
+    }
+
+    @Test
+    void nullCurrentTimePreservesRetrySchedule() {
+        Delivery delivery = newDelivery();
+        delivery.tryStartProcessing();
+        Instant retryAt = Instant.parse("2026-11-02T00:01:00Z");
+        delivery.scheduleRetry(retryAt);
+
+        assertThrows(NullPointerException.class, () -> delivery.tryStartRetry(null));
+
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, delivery.getStatus());
+        assertEquals(retryAt, delivery.getNextAttemptAt());
+    }
+
+    @Test
+    void waitingRetryCannotStartAsNewDeliveryOrBeCompleted() {
+        Delivery delivery = newDelivery();
+        delivery.tryStartProcessing();
+        Instant retryAt = Instant.parse("2026-11-02T00:01:00Z");
+        delivery.scheduleRetry(retryAt);
+
+        assertFalse(delivery.tryStartProcessing());
+        assertThrows(IllegalStateException.class, delivery::markDelivered);
+        assertThrows(IllegalStateException.class, delivery::markFailed);
+        assertThrows(IllegalStateException.class, () -> delivery.scheduleRetry(retryAt.plusSeconds(60)));
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, delivery.getStatus());
+        assertEquals(retryAt, delivery.getNextAttemptAt());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = DeliveryStatus.class, names = {"PENDING", "PROCESSING", "DELIVERED", "FAILED"})
+    void unscheduledDeliveryCannotStartRetry(DeliveryStatus status) {
+        Delivery delivery = deliveryInStatus(status);
+
+        assertFalse(delivery.tryStartRetry(Instant.parse("2026-11-02T00:01:00Z")));
+
+        assertEquals(status, delivery.getStatus());
+        assertNull(delivery.getNextAttemptAt());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = DeliveryStatus.class, names = {"PENDING", "DELIVERED", "FAILED"})
+    void onlyProcessingDeliveryCanScheduleRetry(DeliveryStatus status) {
+        Delivery delivery = deliveryInStatus(status);
+
+        assertThrows(IllegalStateException.class,
+                () -> delivery.scheduleRetry(Instant.parse("2026-11-02T00:01:00Z")));
+
+        assertEquals(status, delivery.getStatus());
+        assertNull(delivery.getNextAttemptAt());
+    }
+
+    @Test
+    void scheduledRetryCanStartExactlyAtDueTime() {
+        Delivery delivery = newDelivery();
+        assertTrue(delivery.tryStartProcessing());
+        Instant retryAt = Instant.parse("2026-11-02T00:01:00Z");
+        delivery.scheduleRetry(retryAt);
+
+        assertTrue(delivery.tryStartRetry(retryAt));
+
+        assertEquals(DeliveryStatus.PROCESSING, delivery.getStatus());
+        assertNull(delivery.getNextAttemptAt());
+    }
+
+    @Test
+    void scheduledRetryCannotStartBeforeDueTime() {
+        Delivery delivery = newDelivery();
+        assertTrue(delivery.tryStartProcessing());
+        Instant retryAt = Instant.parse("2026-11-02T00:01:00Z");
+        delivery.scheduleRetry(retryAt);
+
+        assertFalse(delivery.tryStartRetry(retryAt.minusSeconds(1)));
+
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, delivery.getStatus());
+        assertEquals(retryAt, delivery.getNextAttemptAt());
+    }
+
+    @Test
+    void nullRetryTimeLeavesDeliveryProcessing() {
+        Delivery delivery = newDelivery();
+        assertTrue(delivery.tryStartProcessing());
+
+        assertThrows(NullPointerException.class,
+                () -> delivery.scheduleRetry(null));
+
+        assertEquals(DeliveryStatus.PROCESSING, delivery.getStatus());
+        assertNull(delivery.getNextAttemptAt());
+    }
+
+    @Test
+    void processingDeliveryCanScheduleRetry() {
+        Delivery delivery = newDelivery();
+        assertTrue(delivery.tryStartProcessing());
+        Instant retryAt = Instant.parse("2026-11-02T00:01:00Z");
+
+        delivery.scheduleRetry(retryAt);
+
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, delivery.getStatus());
+        assertEquals(retryAt, delivery.getNextAttemptAt());
+    }
 
     @Test
     void pendingDeliveryStartsProcessingOnlyOnce() {
@@ -77,6 +192,19 @@ class DeliveryTests {
 
         assertThrows(IllegalStateException.class, delivery::markFailed);
         assertEquals(terminalStatus, delivery.getStatus());
+    }
+
+    private Delivery deliveryInStatus(DeliveryStatus status) {
+        Delivery delivery = newDelivery();
+        if (status != DeliveryStatus.PENDING) {
+            delivery.tryStartProcessing();
+        }
+        if (status == DeliveryStatus.DELIVERED) {
+            delivery.markDelivered();
+        } else if (status == DeliveryStatus.FAILED) {
+            delivery.markFailed();
+        }
+        return delivery;
     }
 
     private Delivery newDelivery() {

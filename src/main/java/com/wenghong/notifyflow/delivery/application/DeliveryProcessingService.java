@@ -19,6 +19,7 @@ import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 @Service
 public class DeliveryProcessingService {
 
+    private final DeliveryRetryPolicy retryPolicy;
     private final TransactionTemplate transactions;
 
     private final WebhookHttpSender sender;
@@ -28,21 +29,29 @@ public class DeliveryProcessingService {
     private final DeliveryAttemptRepository attempts;
 
     public DeliveryProcessingService(DeliveryRepository repository, Clock clock, TransactionTemplate transactions,
-            DeliveryAttemptRepository attempts, WebhookHttpSender sender) {
+            DeliveryAttemptRepository attempts, WebhookHttpSender sender,
+            DeliveryRetryPolicy retryPolicy) {
         this.repository = repository;
         this.clock = clock;
         this.transactions = transactions;
         this.attempts = attempts;
         this.sender = sender;
+        this.retryPolicy = retryPolicy;
     }
 
     public Optional<DeliveryWork> claim(UUID deliveryId) {
         return transactions.execute(status -> repository.findByIdForUpdate(deliveryId).flatMap(delivery -> {
-            if (!delivery.tryStartProcessing()) {
+
+            Instant now = Instant.now(clock);
+
+            if (!delivery.tryStartProcessing() && !delivery.tryStartRetry(now)) {
                 return Optional.empty();
             }
 
-            DeliveryAttempt attempt = attempts.saveAndFlush(new DeliveryAttempt(delivery, 1, Instant.now(clock)));
+            int nextAttemptNumber = attempts.findFirstByDelivery_IdOrderByAttemptNumberDesc(deliveryId)
+                    .map(previous -> previous.getAttemptNumber() + 1).orElse(1);
+
+            DeliveryAttempt attempt = attempts.saveAndFlush(new DeliveryAttempt(delivery, nextAttemptNumber, now));
 
             return Optional.of(new DeliveryWork(
                     delivery.getId(),
@@ -64,13 +73,26 @@ public class DeliveryProcessingService {
             if (!attempt.getDelivery().getId().equals(deliveryId)) {
                 throw new IllegalArgumentException("Attempt does not belong to this delivery.");
             }
-            attempt.completeWithResponse(responseStatus, Instant.now(clock));
 
-            if (responseStatus >= 200 && responseStatus <= 299) {
+            Instant now = Instant.now(clock);
+
+            attempt.completeWithResponse(responseStatus, now);
+
+            if (responseStatus >= 200 && responseStatus <= 299)
                 delivery.markDelivered();
+            else if (retryPolicy.isRetryableStatus(responseStatus)
+                    && retryPolicy.canRetry(attempt.getAttemptNumber())) {
+                delivery.scheduleRetry(now.plus(retryPolicy.retryDelay(attempt.getAttemptNumber())));
             } else {
                 delivery.markFailed();
             }
+            // attempt.completeWithResponse(responseStatus, Instant.now(clock));
+
+            // if (responseStatus >= 200 && responseStatus <= 299) {
+            // delivery.markDelivered();
+            // } else {
+            // delivery.markFailed();
+            // }
 
         });
 
@@ -88,11 +110,16 @@ public class DeliveryProcessingService {
             if (!attempt.getDelivery().getId().equals(deliveryId)) {
                 throw new IllegalArgumentException("Attempt does not belong to this delivery.");
             }
+            Instant now = Instant.now(clock);
 
-            attempt.completeWithFailure(errorMessage, Instant.now(clock));
+            attempt.completeWithFailure(errorMessage,now);
 
-            delivery.markFailed();
-
+            if (retryPolicy.canRetry(attempt.getAttemptNumber())) {
+                delivery.scheduleRetry(
+                        now.plus(retryPolicy.retryDelay(attempt.getAttemptNumber())));
+            } else {
+                delivery.markFailed();
+            }
         });
     }
 

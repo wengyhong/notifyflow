@@ -6,9 +6,11 @@ import com.wenghong.notifyflow.delivery.application.DeliveryProcessingService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.dao.DataAccessResourceFailureException;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -50,7 +52,10 @@ class DeliveryJobListenerTests {
         DeliveryProcessingService service = mock(DeliveryProcessingService.class);
         DeliveryJobListener listener = new DeliveryJobListener(service);
 
-        assertThrows(IllegalArgumentException.class, () -> listener.receive(message));
+        AmqpRejectAndDontRequeueException thrown = assertThrows(
+                AmqpRejectAndDontRequeueException.class, () -> listener.receive(message));
+
+        assertInstanceOf(IllegalArgumentException.class, thrown.getCause());
 
         verifyNoInteractions(service);
     }
@@ -67,6 +72,21 @@ class DeliveryJobListenerTests {
         DataAccessResourceFailureException thrown = assertThrows(
                 DataAccessResourceFailureException.class,
                 () -> listener.receive(deliveryId.toString()));
+
+        assertSame(failure, thrown);
+        verify(service).process(deliveryId);
+    }
+
+    @Test
+    void processingIllegalArgumentExceptionIsNotClassifiedAsMalformedMessage() throws InterruptedException {
+        DeliveryProcessingService service = mock(DeliveryProcessingService.class);
+        DeliveryJobListener listener = new DeliveryJobListener(service);
+        UUID deliveryId = UUID.randomUUID();
+        IllegalArgumentException failure = new IllegalArgumentException("Invalid processing state");
+        doThrow(failure).when(service).process(deliveryId);
+
+        IllegalArgumentException thrown = assertThrows(
+                IllegalArgumentException.class, () -> listener.receive(deliveryId.toString()));
 
         assertSame(failure, thrown);
         verify(service).process(deliveryId);

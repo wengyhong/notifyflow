@@ -2,6 +2,7 @@ package com.wenghong.notifyflow.delivery.messaging;
 
 import java.util.UUID;
 
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
@@ -16,9 +17,14 @@ public class DeliveryJobListener {
     }
 
     @RabbitListener(queues = DeliveryMessagingConfiguration.DELIVERY_QUEUE)
-    public void receive(String deliveryId) throws InterruptedException
-    {
-        service.process(UUID.fromString(deliveryId));
+    public void receive(String deliveryId) throws InterruptedException {
+        UUID id;
+        try {
+            id = UUID.fromString(deliveryId);
+        } catch (IllegalArgumentException error) {
+            throw new AmqpRejectAndDontRequeueException("Invalid delivery ID", error);
+        }
+        service.process(id);
     }
 
 }

@@ -3,6 +3,7 @@ package com.wenghong.notifyflow.delivery.persistence;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
@@ -17,6 +18,7 @@ import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -24,6 +26,7 @@ import org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -55,6 +58,76 @@ class DeliveryRepositoryTests {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Test
+    void dueRetryQueryOrdersByTimeThenIdAndHonorsBatchLimit() {
+        Instant now = CREATED_AT.plusSeconds(120);
+        Delivery latest = saveScheduledDelivery("latest", now);
+        Delivery tieA = saveScheduledDelivery("tie-a", now.minusSeconds(30));
+        Delivery earliest = saveScheduledDelivery("earliest", now.minusSeconds(60));
+        Delivery tieB = saveScheduledDelivery("tie-b", now.minusSeconds(30));
+        List<UUID> tiedIds = List.of(tieA.getId(), tieB.getId()).stream()
+                // PostgreSQL compares UUID bytes unsigned; canonical text has the same ordering.
+                .sorted(Comparator.comparing(UUID::toString)).toList();
+        entityManager.clear();
+
+        assertEquals(List.of(earliest.getId(), tiedIds.getFirst()), deliveries.findDueRetryIds(
+                DeliveryStatus.RETRY_SCHEDULED, now, PageRequest.of(0, 2)));
+        assertEquals(List.of(tiedIds.getLast(), latest.getId()), deliveries.findDueRetryIds(
+                DeliveryStatus.RETRY_SCHEDULED, now, PageRequest.of(1, 2)));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = DeliveryStatus.class, names = {"PENDING", "PROCESSING", "DELIVERED", "FAILED"})
+    void dueRetryQueryExcludesOtherStatusesEvenWithPastTimestamp(DeliveryStatus status) {
+        Delivery delivery = new Delivery(saveEvent("not-scheduled"), saveEndpoint("Warehouse"), CREATED_AT);
+        if (status != DeliveryStatus.PENDING) {
+            delivery.tryStartProcessing();
+        }
+        if (status == DeliveryStatus.DELIVERED) {
+            delivery.markDelivered();
+        } else if (status == DeliveryStatus.FAILED) {
+            delivery.markFailed();
+        }
+        delivery = deliveries.saveAndFlush(delivery);
+        // Deliberately populate the timestamp to test the status filter independently.
+        jdbcTemplate.update("UPDATE deliveries SET next_attempt_at = ? WHERE id = ?",
+                Timestamp.from(CREATED_AT), delivery.getId());
+        entityManager.clear();
+
+        assertEquals(List.of(), deliveries.findDueRetryIds(
+                DeliveryStatus.RETRY_SCHEDULED, CREATED_AT, PageRequest.of(0, 100)));
+    }
+
+    @Test
+    void dueRetryQueryReturnsEmptyWhenNoDeliveriesExist() {
+        assertEquals(List.of(), deliveries.findDueRetryIds(
+                DeliveryStatus.RETRY_SCHEDULED, CREATED_AT, PageRequest.of(0, 100)));
+    }
+
+    @Test
+    void findsDueRetryButExcludesFutureRetry() {
+        WebhookEndpoint endpoint = saveEndpoint("Warehouse");
+
+        Delivery due = new Delivery(saveEvent("due-retry"), endpoint, CREATED_AT);
+        due.tryStartProcessing();
+        due.scheduleRetry(CREATED_AT);
+
+        Delivery future = new Delivery(saveEvent("future-retry"), endpoint, CREATED_AT);
+        future.tryStartProcessing();
+        future.scheduleRetry(CREATED_AT.plusSeconds(60));
+
+        deliveries.saveAllAndFlush(List.of(due, future));
+        entityManager.clear();
+
+        List<UUID> result = deliveries.findDueRetryIds(
+                DeliveryStatus.RETRY_SCHEDULED, CREATED_AT, PageRequest.of(0, 100));
+
+        assertEquals(List.of(due.getId()), result);
+        Delivery reloaded = deliveries.findById(due.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, reloaded.getStatus());
+        assertEquals(CREATED_AT, reloaded.getNextAttemptAt());
+    }
 
     @Test
     void savesAndReloadsPendingDeliveryWithEventAndEndpoint() {
@@ -162,6 +235,13 @@ class DeliveryRepositoryTests {
                 () -> insertDelivery(eventId, endpointId, status, createdAt));
 
         assertSqlState(exception, "23502"); // not_null_violation
+    }
+
+    private Delivery saveScheduledDelivery(String key, Instant retryAt) {
+        Delivery delivery = new Delivery(saveEvent(key), saveEndpoint(key), CREATED_AT);
+        delivery.tryStartProcessing();
+        delivery.scheduleRetry(retryAt);
+        return deliveries.saveAndFlush(delivery);
     }
 
     private Event saveEvent(String key) {

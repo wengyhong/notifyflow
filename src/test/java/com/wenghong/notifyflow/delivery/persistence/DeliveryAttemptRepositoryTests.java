@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
@@ -60,6 +61,32 @@ class DeliveryAttemptRepositoryTests {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Test
+    void latestAttemptLookupIsEmptyWhenDeliveryHasNoHistory() {
+        Delivery delivery = saveDelivery();
+
+        assertTrue(attempts.findFirstByDelivery_IdOrderByAttemptNumberDesc(delivery.getId()).isEmpty());
+        assertTrue(attempts.findFirstByDelivery_IdOrderByAttemptNumberDesc(UUID.randomUUID()).isEmpty());
+    }
+
+    @Test
+    void latestAttemptLookupUsesHighestNumberForRequestedDelivery() {
+        Delivery delivery = saveDelivery();
+        Delivery other = saveDelivery();
+        DeliveryAttempt highest = attempts.saveAndFlush(new DeliveryAttempt(delivery, 3, STARTED_AT));
+        attempts.saveAndFlush(new DeliveryAttempt(delivery, 1, STARTED_AT.plusSeconds(20)));
+        attempts.saveAndFlush(new DeliveryAttempt(delivery, 2, STARTED_AT.plusSeconds(10)));
+        attempts.saveAndFlush(new DeliveryAttempt(other, 9, STARTED_AT.plusSeconds(30)));
+        entityManager.clear();
+
+        DeliveryAttempt found = attempts.findFirstByDelivery_IdOrderByAttemptNumberDesc(delivery.getId())
+                .orElseThrow();
+
+        assertEquals(highest.getId(), found.getId());
+        assertEquals(3, found.getAttemptNumber());
+        assertEquals(delivery.getId(), found.getDelivery().getId());
+    }
 
     @Test
     void savesAndReloadsUnfinishedAttemptWithDeliveryRelationship() {

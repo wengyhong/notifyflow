@@ -7,6 +7,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.random.RandomGenerator;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,6 +66,7 @@ import static org.mockito.Mockito.when;
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({PostgresTestConfiguration.class, DeliveryProcessingService.class,
+        DeliveryRetryPolicy.class,
         DeliveryProcessingServiceIntegrationTests.FixedClockConfiguration.class})
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class DeliveryProcessingServiceIntegrationTests {
@@ -77,6 +79,9 @@ class DeliveryProcessingServiceIntegrationTests {
 
     @MockitoBean
     private WebhookHttpSender sender;
+
+    @MockitoBean
+    private RandomGenerator random;
 
     @Autowired
     private DeliveryRepository deliveries;
@@ -100,7 +105,7 @@ class DeliveryProcessingServiceIntegrationTests {
     }
 
     @ParameterizedTest
-    @CsvSource({"204, DELIVERED", "503, FAILED"})
+    @CsvSource({"204, DELIVERED", "400, FAILED", "503, RETRY_SCHEDULED"})
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void processSendsOutsideTransactionAndPersistsResponse(
             int responseStatus, DeliveryStatus expectedStatus) throws Exception {
@@ -125,6 +130,40 @@ class DeliveryProcessingServiceIntegrationTests {
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void dueRetryCreatesSecondAttempt() {
+        Delivery delivery = savePendingDelivery();
+        assertTrue(delivery.tryStartProcessing());
+
+        DeliveryAttempt firstAttempt = new DeliveryAttempt(delivery, 1, NOW);
+        firstAttempt.completeWithResponse(503, NOW);
+        firstAttempt = attempts.saveAndFlush(firstAttempt);
+
+        delivery.scheduleRetry(NOW);
+        deliveries.saveAndFlush(delivery);
+
+        DeliveryWork work = service.claim(delivery.getId()).orElseThrow();
+
+        DeliveryAttempt secondAttempt = attempts.findById(work.attemptId()).orElseThrow();
+        assertEquals(2, secondAttempt.getAttemptNumber());
+        assertEquals(delivery.getId(), secondAttempt.getDelivery().getId());
+        assertEquals(NOW, secondAttempt.getStartedAt());
+        assertNull(secondAttempt.getCompletedAt());
+        assertNull(secondAttempt.getResponseStatus());
+        assertNull(secondAttempt.getErrorMessage());
+        assertEquals(2L, attempts.count());
+
+        Delivery persisted = deliveries.findById(delivery.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.PROCESSING, persisted.getStatus());
+        assertNull(persisted.getNextAttemptAt());
+
+        DeliveryAttempt previous = attempts.findById(firstAttempt.getId()).orElseThrow();
+        assertEquals(1, previous.getAttemptNumber());
+        assertEquals(Integer.valueOf(503), previous.getResponseStatus());
+        assertEquals(NOW, previous.getCompletedAt());
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void processRecordsIOException() throws Exception {
         UUID deliveryId = savePendingDelivery().getId();
         when(sender.send(any(DeliveryWork.class)))
@@ -133,7 +172,7 @@ class DeliveryProcessingServiceIntegrationTests {
         service.process(deliveryId);
 
         verify(sender).send(any(DeliveryWork.class));
-        assertProcessOutcome(deliveryId, DeliveryStatus.FAILED, null, "Connection timed out");
+        assertProcessOutcome(deliveryId, DeliveryStatus.RETRY_SCHEDULED, null, "Connection timed out");
     }
 
     @ParameterizedTest
@@ -147,7 +186,7 @@ class DeliveryProcessingServiceIntegrationTests {
         service.process(deliveryId);
 
         verify(sender).send(any(DeliveryWork.class));
-        assertProcessOutcome(deliveryId, DeliveryStatus.FAILED, null, "IOException");
+        assertProcessOutcome(deliveryId, DeliveryStatus.RETRY_SCHEDULED, null, "IOException");
     }
 
     @Test
@@ -243,7 +282,8 @@ class DeliveryProcessingServiceIntegrationTests {
 
         Delivery delivery = deliveries.findById(work.id()).orElseThrow();
         DeliveryAttempt attempt = attempts.findById(work.attemptId()).orElseThrow();
-        assertEquals(DeliveryStatus.FAILED, delivery.getStatus());
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, delivery.getStatus());
+        assertEquals(NOW.plusSeconds(5), delivery.getNextAttemptAt());
         assertEquals(NOW, delivery.getCreatedAt());
         assertEquals(work.id(), attempt.getDelivery().getId());
         assertEquals(1, attempt.getAttemptNumber());
@@ -270,7 +310,11 @@ class DeliveryProcessingServiceIntegrationTests {
             "299, DELIVERED",
             "300, FAILED",
             "400, FAILED",
-            "503, FAILED"
+            "408, RETRY_SCHEDULED",
+            "429, RETRY_SCHEDULED",
+            "500, RETRY_SCHEDULED",
+            "503, RETRY_SCHEDULED",
+            "599, RETRY_SCHEDULED"
     })
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void recordResponsePersistsAttemptAndDeliveryOutcome(
@@ -283,6 +327,8 @@ class DeliveryProcessingServiceIntegrationTests {
         Delivery delivery = deliveries.findById(work.id()).orElseThrow();
         DeliveryAttempt attempt = attempts.findById(work.attemptId()).orElseThrow();
         assertEquals(expectedStatus, delivery.getStatus());
+        assertEquals(expectedStatus == DeliveryStatus.RETRY_SCHEDULED ? NOW.plusSeconds(5) : null,
+                delivery.getNextAttemptAt());
         assertEquals(NOW, delivery.getCreatedAt());
         assertEquals(work.id(), attempt.getDelivery().getId());
         assertEquals(1, attempt.getAttemptNumber());
@@ -334,10 +380,22 @@ class DeliveryProcessingServiceIntegrationTests {
         assertEquals(0L, attempts.count());
     }
 
-    @Test
+    @ParameterizedTest
+    @EnumSource(value = DeliveryStatus.class, names = {"PENDING", "RETRY_SCHEDULED"})
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void concurrentClaimsReturnWorkToOnlyOneWorker() throws Exception {
+    void concurrentClaimsReturnWorkToOnlyOneWorker(DeliveryStatus initialStatus) throws Exception {
         UUID deliveryId = savePendingDelivery().getId();
+        int expectedAttemptNumber = 1;
+        if (initialStatus == DeliveryStatus.RETRY_SCHEDULED) {
+            DeliveryWork first = service.claim(deliveryId).orElseThrow();
+            DeliveryAttempt previous = attempts.findById(first.attemptId()).orElseThrow();
+            previous.completeWithResponse(503, NOW);
+            attempts.saveAndFlush(previous);
+            Delivery delivery = deliveries.findById(deliveryId).orElseThrow();
+            delivery.scheduleRetry(NOW);
+            deliveries.saveAndFlush(delivery);
+            expectedAttemptNumber = 2;
+        }
         CyclicBarrier start = new CyclicBarrier(2);
         Optional<DeliveryWork> firstResult;
         Optional<DeliveryWork> secondResult;
@@ -371,8 +429,9 @@ class DeliveryProcessingServiceIntegrationTests {
         assertEquals(1L, deliveries.count());
         assertEquals(DeliveryStatus.PROCESSING,
                 deliveries.findById(deliveryId).orElseThrow().getStatus());
-        assertEquals(1L, attempts.count());
-        assertUnfinishedAttempt(claimed.getFirst());
+        assertEquals((long) expectedAttemptNumber, attempts.count());
+        assertNull(deliveries.findById(deliveryId).orElseThrow().getNextAttemptAt());
+        assertUnfinishedAttempt(claimed.getFirst(), expectedAttemptNumber);
     }
 
     @Test
@@ -407,9 +466,148 @@ class DeliveryProcessingServiceIntegrationTests {
         assertUnfinishedAttempt(work);
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "1, RETRY_SCHEDULED, 5",
+            "2, RETRY_SCHEDULED, 10",
+            "3, RETRY_SCHEDULED, 20",
+            "4, RETRY_SCHEDULED, 40",
+            "5, FAILED, 0"
+    })
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void retryableResponseUsesBackoffAndStopsAfterFifthAttempt(
+            int attemptNumber, DeliveryStatus expectedStatus, long delaySeconds) {
+        DeliveryWork work = saveProcessingAttempt(attemptNumber);
+
+        service.recordResponse(work.id(), work.attemptId(), 503);
+
+        assertRecordedAttempt(work, attemptNumber, expectedStatus, 503, null, delaySeconds);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "1, RETRY_SCHEDULED, 5",
+            "2, RETRY_SCHEDULED, 10",
+            "3, RETRY_SCHEDULED, 20",
+            "4, RETRY_SCHEDULED, 40",
+            "5, FAILED, 0"
+    })
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void networkFailureUsesBackoffAndStopsAfterFifthAttempt(
+            int attemptNumber, DeliveryStatus expectedStatus, long delaySeconds) {
+        DeliveryWork work = saveProcessingAttempt(attemptNumber);
+
+        service.recordFailure(work.id(), work.attemptId(), "Connection timed out");
+
+        assertRecordedAttempt(work, attemptNumber, expectedStatus, null, "Connection timed out", delaySeconds);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"204, DELIVERED", "400, FAILED"})
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void finalAttemptCanSucceedOrFailPermanently(int responseStatus, DeliveryStatus expectedStatus) {
+        DeliveryWork work = saveProcessingAttempt(5);
+
+        service.recordResponse(work.id(), work.attemptId(), responseStatus);
+
+        assertRecordedAttempt(work, 5, expectedStatus, responseStatus, null, 0);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void processSkipsRetryBeforeDueTimeWithoutCreatingAnotherAttempt() throws Exception {
+        DeliveryWork first = service.claim(savePendingDelivery().getId()).orElseThrow();
+        service.recordResponse(first.id(), first.attemptId(), 503);
+
+        service.process(first.id());
+
+        verifyNoInteractions(sender);
+        assertRecordedAttempt(first, 1, DeliveryStatus.RETRY_SCHEDULED, 503, null, 5);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void retryClaimRollsBackScheduleWhenAttemptCreationFails() {
+        DeliveryWork first = service.claim(savePendingDelivery().getId()).orElseThrow();
+        service.recordResponse(first.id(), first.attemptId(), 503);
+        Delivery delivery = deliveries.findById(first.id()).orElseThrow();
+        // Make the persisted schedule due without changing the service's fixed clock.
+        assertTrue(delivery.tryStartRetry(NOW.plusSeconds(5)));
+        delivery.scheduleRetry(NOW);
+        deliveries.saveAndFlush(delivery);
+        IllegalStateException failure = new IllegalStateException("Simulated retry storage failure");
+        doThrow(failure).when(attempts).saveAndFlush(any(DeliveryAttempt.class));
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> service.claim(first.id()));
+
+        assertSame(failure, thrown);
+        Delivery persisted = deliveries.findById(first.id()).orElseThrow();
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, persisted.getStatus());
+        assertEquals(NOW, persisted.getNextAttemptAt());
+        assertEquals(1L, attempts.count());
+        assertEquals(Integer.valueOf(503),
+                attempts.findById(first.attemptId()).orElseThrow().getResponseStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void recordedRetryScheduleIncludesNonzeroJitter(boolean networkFailure) {
+        DeliveryWork work = saveProcessingAttempt(2);
+        when(random.nextLong(2001L)).thenReturn(1500L);
+
+        if (networkFailure) {
+            service.recordFailure(work.id(), work.attemptId(), "Connection timed out");
+        } else {
+            service.recordResponse(work.id(), work.attemptId(), 503);
+        }
+
+        Delivery delivery = deliveries.findById(work.id()).orElseThrow();
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, delivery.getStatus());
+        assertEquals(NOW.plusMillis(11500), delivery.getNextAttemptAt());
+        DeliveryAttempt attempt = attempts.findById(work.attemptId()).orElseThrow();
+        assertEquals(NOW, attempt.getCompletedAt());
+        assertEquals(networkFailure ? null : Integer.valueOf(503), attempt.getResponseStatus());
+        assertEquals(networkFailure ? "Connection timed out" : null, attempt.getErrorMessage());
+        assertEquals(2L, attempts.count());
+        verify(random).nextLong(2001L);
+    }
+
+    private DeliveryWork saveProcessingAttempt(int attemptNumber) {
+        Delivery delivery = savePendingDelivery();
+        assertTrue(delivery.tryStartProcessing());
+        delivery = deliveries.saveAndFlush(delivery);
+        for (int number = 1; number < attemptNumber; number++) {
+            DeliveryAttempt previous = new DeliveryAttempt(delivery, number, NOW);
+            previous.completeWithResponse(503, NOW);
+            attempts.saveAndFlush(previous);
+        }
+        DeliveryAttempt current = attempts.saveAndFlush(new DeliveryAttempt(delivery, attemptNumber, NOW));
+        return new DeliveryWork(delivery.getId(), current.getId(),
+                "https://example.com/webhooks", JSON.readTree("{\"orderNumber\":\"128\"}"));
+    }
+
+    private void assertRecordedAttempt(DeliveryWork work, int attemptNumber, DeliveryStatus status,
+            Integer responseStatus, String errorMessage, long delaySeconds) {
+        Delivery delivery = deliveries.findById(work.id()).orElseThrow();
+        assertEquals(status, delivery.getStatus());
+        assertEquals(delaySeconds == 0 ? null : NOW.plusSeconds(delaySeconds), delivery.getNextAttemptAt());
+        DeliveryAttempt attempt = attempts.findById(work.attemptId()).orElseThrow();
+        assertEquals(work.id(), attempt.getDelivery().getId());
+        assertEquals(attemptNumber, attempt.getAttemptNumber());
+        assertEquals(NOW, attempt.getCompletedAt());
+        assertEquals(responseStatus, attempt.getResponseStatus());
+        assertEquals(errorMessage, attempt.getErrorMessage());
+        assertEquals((long) attemptNumber, attempts.count());
+    }
+
     private void assertProcessOutcome(UUID deliveryId, DeliveryStatus status,
             Integer responseStatus, String errorMessage) {
-        assertEquals(status, deliveries.findById(deliveryId).orElseThrow().getStatus());
+        Delivery persisted = deliveries.findById(deliveryId).orElseThrow();
+        assertEquals(status, persisted.getStatus());
+        assertEquals(status == DeliveryStatus.RETRY_SCHEDULED ? NOW.plusSeconds(5) : null,
+                persisted.getNextAttemptAt());
         List<DeliveryAttempt> stored = attempts.findAll();
         assertEquals(1, stored.size());
         DeliveryAttempt attempt = stored.getFirst();
@@ -422,10 +620,14 @@ class DeliveryProcessingServiceIntegrationTests {
     }
 
     private void assertUnfinishedAttempt(DeliveryWork work) {
+        assertUnfinishedAttempt(work, 1);
+    }
+
+    private void assertUnfinishedAttempt(DeliveryWork work, int expectedAttemptNumber) {
         assertNotNull(work.attemptId());
         DeliveryAttempt attempt = attempts.findById(work.attemptId()).orElseThrow();
         assertEquals(work.id(), attempt.getDelivery().getId());
-        assertEquals(1, attempt.getAttemptNumber());
+        assertEquals(expectedAttemptNumber, attempt.getAttemptNumber());
         assertEquals(NOW, attempt.getStartedAt());
         assertNull(attempt.getCompletedAt());
         assertNull(attempt.getResponseStatus());
