@@ -4,18 +4,18 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
-import com.wenghong.notifyflow.delivery.application.DeliveryCreatedEvent;
+import com.wenghong.notifyflow.delivery.application.DeliveryRequestedEvent;
 
 @Component
-public class DeliveryCreatedEventListener {
+public class DeliveryRequestedEventListener {
     private final DeliveryJobPublisher publisher;
 
-    public DeliveryCreatedEventListener(DeliveryJobPublisher publisher) {
+    public DeliveryRequestedEventListener(DeliveryJobPublisher publisher) {
         this.publisher = publisher;
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-    public void handle(DeliveryCreatedEvent event)
+    public void handle(DeliveryRequestedEvent event)
     {
         publisher.publish(event.deliveryId());
     }

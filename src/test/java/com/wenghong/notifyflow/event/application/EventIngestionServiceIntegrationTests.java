@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 
 import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.domain.DeliveryStatus;
-import com.wenghong.notifyflow.delivery.messaging.DeliveryCreatedEventListener;
+import com.wenghong.notifyflow.delivery.messaging.DeliveryRequestedEventListener;
 import com.wenghong.notifyflow.delivery.messaging.DeliveryJobPublisher;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
@@ -65,7 +65,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({PostgresTestConfiguration.class, EventIngestionService.class,
-        DeliveryCreatedEventListener.class,
+        DeliveryRequestedEventListener.class,
         EventIngestionServiceIntegrationTests.FixedClockConfiguration.class})
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class EventIngestionServiceIntegrationTests {

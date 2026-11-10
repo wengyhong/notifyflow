@@ -60,6 +60,59 @@ class DeliveryRepositoryTests {
     private JdbcTemplate jdbcTemplate;
 
     @Test
+    void databaseDefaultsRetryCycleToOneWhenColumnIsOmitted() {
+        Event event = saveEvent("default-retry-cycle");
+        WebhookEndpoint endpoint = saveEndpoint("Warehouse");
+
+        insertDelivery(event.getId(), endpoint.getId(), "PENDING", Timestamp.from(CREATED_AT));
+
+        assertEquals(Integer.valueOf(1), jdbcTemplate.queryForObject(
+                "SELECT retry_cycle_start_attempt FROM deliveries WHERE event_id = ?",
+                Integer.class, event.getId()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1})
+    void databaseRejectsNonPositiveRetryCycleStart(int cycleStart) {
+        Delivery delivery = deliveries.saveAndFlush(new Delivery(
+                saveEvent("invalid-retry-cycle"), saveEndpoint("Warehouse"), CREATED_AT));
+
+        DataIntegrityViolationException error = assertThrows(DataIntegrityViolationException.class,
+                () -> jdbcTemplate.update("UPDATE deliveries SET retry_cycle_start_attempt = ? WHERE id = ?",
+                        cycleStart, delivery.getId()));
+
+        assertSqlState(error, "23514");
+    }
+
+    @Test
+    void databaseRejectsNullRetryCycleStart() {
+        Delivery delivery = deliveries.saveAndFlush(new Delivery(
+                saveEvent("null-retry-cycle"), saveEndpoint("Warehouse"), CREATED_AT));
+
+        DataIntegrityViolationException error = assertThrows(DataIntegrityViolationException.class,
+                () -> jdbcTemplate.update(
+                        "UPDATE deliveries SET retry_cycle_start_attempt = NULL WHERE id = ?", delivery.getId()));
+
+        assertSqlState(error, "23502");
+    }
+
+    @Test
+    void replayCycleStartIsPersistedAndReloaded() {
+        Delivery delivery = new Delivery(saveEvent("persist-replay"), saveEndpoint("Warehouse"), CREATED_AT);
+        delivery.tryStartProcessing();
+        delivery.markFailed();
+        deliveries.saveAndFlush(delivery);
+
+        delivery.requestReplay(6);
+        deliveries.flush();
+        entityManager.clear();
+
+        Delivery reloaded = deliveries.findById(delivery.getId()).orElseThrow();
+        assertEquals(6, reloaded.getRetryCycleStartAttempt());
+        assertEquals(DeliveryStatus.PENDING, reloaded.getStatus());
+    }
+
+    @Test
     void dueRetryQueryOrdersByTimeThenIdAndHonorsBatchLimit() {
         Instant now = CREATED_AT.plusSeconds(120);
         Delivery latest = saveScheduledDelivery("latest", now);
@@ -149,6 +202,7 @@ class DeliveryRepositoryTests {
         assertEquals("Warehouse", reloaded.getEndpoint().getName());
         assertEquals(DeliveryStatus.PENDING, reloaded.getStatus());
         assertEquals(CREATED_AT, reloaded.getCreatedAt());
+        assertEquals(1, reloaded.getRetryCycleStartAttempt());
         // Verify the enum is stored by name, not by its numeric position.
         assertEquals("PENDING", jdbcTemplate.queryForObject(
                 "SELECT status FROM deliveries WHERE id = ?", String.class, deliveryId));

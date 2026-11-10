@@ -74,6 +74,9 @@ public class DeliveryProcessingService {
                 throw new IllegalArgumentException("Attempt does not belong to this delivery.");
             }
 
+            int cycleAttemptNumber = delivery.attemptNumberInCurrentCycle(attempt.getAttemptNumber());
+
+
             Instant now = Instant.now(clock);
 
             attempt.completeWithResponse(responseStatus, now);
@@ -81,8 +84,8 @@ public class DeliveryProcessingService {
             if (responseStatus >= 200 && responseStatus <= 299)
                 delivery.markDelivered();
             else if (retryPolicy.isRetryableStatus(responseStatus)
-                    && retryPolicy.canRetry(attempt.getAttemptNumber())) {
-                delivery.scheduleRetry(now.plus(retryPolicy.retryDelay(attempt.getAttemptNumber())));
+                    && retryPolicy.canRetry(cycleAttemptNumber)) {
+                delivery.scheduleRetry(now.plus(retryPolicy.retryDelay(cycleAttemptNumber)));
             } else {
                 delivery.markFailed();
             }
@@ -110,13 +113,16 @@ public class DeliveryProcessingService {
             if (!attempt.getDelivery().getId().equals(deliveryId)) {
                 throw new IllegalArgumentException("Attempt does not belong to this delivery.");
             }
+
+            int cycleAttemptNumber =
+        delivery.attemptNumberInCurrentCycle(attempt.getAttemptNumber());
             Instant now = Instant.now(clock);
 
             attempt.completeWithFailure(errorMessage,now);
 
-            if (retryPolicy.canRetry(attempt.getAttemptNumber())) {
+            if (retryPolicy.canRetry(cycleAttemptNumber)) {
                 delivery.scheduleRetry(
-                        now.plus(retryPolicy.retryDelay(attempt.getAttemptNumber())));
+                        now.plus(retryPolicy.retryDelay(cycleAttemptNumber)));
             } else {
                 delivery.markFailed();
             }

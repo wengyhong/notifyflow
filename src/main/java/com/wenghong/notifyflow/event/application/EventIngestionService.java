@@ -7,7 +7,7 @@ import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import com.wenghong.notifyflow.delivery.application.DeliveryCreatedEvent;
+import com.wenghong.notifyflow.delivery.application.DeliveryRequestedEvent;
 import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 
@@ -76,7 +76,7 @@ public class EventIngestionService {
 
         var savedDeliveries = deliveries.saveAll(pendingDeliveries);
 
-        savedDeliveries.forEach(delivery -> eventPublisher.publishEvent(new DeliveryCreatedEvent(delivery.getId())));
+        savedDeliveries.forEach(delivery -> eventPublisher.publishEvent(new DeliveryRequestedEvent(delivery.getId())));
 
         return event;
 

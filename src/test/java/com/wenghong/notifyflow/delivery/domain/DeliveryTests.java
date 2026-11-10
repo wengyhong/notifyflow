@@ -7,6 +7,8 @@ import com.wenghong.notifyflow.event.domain.Event;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import tools.jackson.databind.json.JsonMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -16,6 +18,101 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DeliveryTests {
+
+    @Test
+    void newDeliveryStartsInFirstRetryCycle() {
+        assertEquals(1, newDelivery().getRetryCycleStartAttempt());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = DeliveryStatus.class, mode = EnumSource.Mode.EXCLUDE, names = "FAILED")
+    void replayRejectsEveryNonFailedStatusWithoutChangingState(DeliveryStatus status) {
+        Delivery delivery = deliveryInStatus(status);
+        Instant originalSchedule = delivery.getNextAttemptAt();
+
+        assertThrows(IllegalStateException.class, () -> delivery.requestReplay(6));
+
+        assertEquals(status, delivery.getStatus());
+        assertEquals(1, delivery.getRetryCycleStartAttempt());
+        assertEquals(originalSchedule, delivery.getNextAttemptAt());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {Integer.MIN_VALUE, -1, 0, 1})
+    void invalidReplayStartLeavesFailedDeliveryUnchanged(int nextAttemptNumber) {
+        Delivery delivery = deliveryInStatus(DeliveryStatus.FAILED);
+
+        assertThrows(IllegalArgumentException.class, () -> delivery.requestReplay(nextAttemptNumber));
+
+        assertEquals(DeliveryStatus.FAILED, delivery.getStatus());
+        assertEquals(1, delivery.getRetryCycleStartAttempt());
+        assertNull(delivery.getNextAttemptAt());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 5, 6})
+    void laterReplayCannotMoveCycleStartBackwards(int nextAttemptNumber) {
+        Delivery delivery = deliveryInStatus(DeliveryStatus.FAILED);
+        delivery.requestReplay(6);
+        delivery.tryStartProcessing();
+        delivery.markFailed();
+
+        assertThrows(IllegalArgumentException.class, () -> delivery.requestReplay(nextAttemptNumber));
+
+        assertEquals(DeliveryStatus.FAILED, delivery.getStatus());
+        assertEquals(6, delivery.getRetryCycleStartAttempt());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"1, 1, 1", "1, 5, 5", "6, 6, 1", "6, 7, 2", "6, 10, 5", "11, 15, 5"})
+    void lifetimeAttemptNumberIsConvertedRelativeToCurrentCycle(
+            int cycleStart, int lifetimeNumber, int expected) {
+        Delivery delivery = newDelivery();
+        if (cycleStart > 1) {
+            delivery = deliveryInStatus(DeliveryStatus.FAILED);
+            delivery.requestReplay(cycleStart);
+        }
+
+        assertEquals(expected, delivery.attemptNumberInCurrentCycle(lifetimeNumber));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {Integer.MIN_VALUE, -1, 0, 1, 5})
+    void attemptBeforeCurrentCycleIsRejected(int attemptNumber) {
+        Delivery delivery = deliveryInStatus(DeliveryStatus.FAILED);
+        delivery.requestReplay(6);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> delivery.attemptNumberInCurrentCycle(attemptNumber));
+
+        assertEquals(6, delivery.getRetryCycleStartAttempt());
+        assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
+    }
+
+    @Test
+    void pendingReplayCannotBeRequestedAgain() {
+        Delivery delivery = deliveryInStatus(DeliveryStatus.FAILED);
+        delivery.requestReplay(6);
+
+        assertThrows(IllegalStateException.class, () -> delivery.requestReplay(7));
+
+        assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
+        assertEquals(6, delivery.getRetryCycleStartAttempt());
+        assertNull(delivery.getNextAttemptAt());
+    }
+
+    @Test
+    void failedDeliveryCanStartNewRetryCycle() {
+        Delivery delivery = deliveryInStatus(DeliveryStatus.FAILED);
+
+        delivery.requestReplay(6);
+
+        assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
+        assertEquals(6, delivery.getRetryCycleStartAttempt());
+        assertNull(delivery.getNextAttemptAt());
+        assertEquals(1, delivery.attemptNumberInCurrentCycle(6));
+        assertEquals(5, delivery.attemptNumberInCurrentCycle(10));
+    }
 
     @Test
     void overdueRetryStartsOnlyOnce() {
@@ -203,6 +300,8 @@ class DeliveryTests {
             delivery.markDelivered();
         } else if (status == DeliveryStatus.FAILED) {
             delivery.markFailed();
+        } else if (status == DeliveryStatus.RETRY_SCHEDULED) {
+            delivery.scheduleRetry(Instant.parse("2026-11-02T00:01:00Z"));
         }
         return delivery;
     }

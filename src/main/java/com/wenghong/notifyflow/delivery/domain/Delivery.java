@@ -43,15 +43,21 @@ public class Delivery {
     private WebhookEndpoint endpoint;
     @Enumerated(EnumType.STRING)
 
-    @Column(nullable = false,length = 30)
+    @Column(nullable = false, length = 30)
     private DeliveryStatus status = DeliveryStatus.PENDING;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
-    @Column (name = "next_attempt_at")
+    @Column(name = "next_attempt_at")
     private Instant nextAttemptAt;
 
+    @Column(name = "retry_cycle_start_attempt", nullable = false)
+    private int retryCycleStartAttempt = 1;
+
+    public int getRetryCycleStartAttempt() {
+        return retryCycleStartAttempt;
+    }
 
     public DeliveryStatus getStatus() {
         return status;
@@ -75,9 +81,8 @@ public class Delivery {
         return endpoint;
     }
 
-    public boolean tryStartProcessing()
-    {
-        if(status != DeliveryStatus.PENDING)
+    public boolean tryStartProcessing() {
+        if (status != DeliveryStatus.PENDING)
             return false;
 
         status = DeliveryStatus.PROCESSING;
@@ -85,20 +90,16 @@ public class Delivery {
         return true;
     }
 
-    public void markDelivered()
-    {
-        if(status != DeliveryStatus.PROCESSING)
-        {
+    public void markDelivered() {
+        if (status != DeliveryStatus.PROCESSING) {
             throw new IllegalStateException("Only a processing delivery can be marked delivered.");
         }
 
         status = DeliveryStatus.DELIVERED;
     }
 
-    public void markFailed()
-    {
-        if(status != DeliveryStatus.PROCESSING)
-        {
+    public void markFailed() {
+        if (status != DeliveryStatus.PROCESSING) {
             throw new IllegalStateException("Only a processing delivery can be marked failed.");
         }
 
@@ -110,10 +111,8 @@ public class Delivery {
         return nextAttemptAt;
     }
 
-    public void scheduleRetry(Instant nextAttemptAt)
-    {
-        if(status != DeliveryStatus.PROCESSING)
-        {
+    public void scheduleRetry(Instant nextAttemptAt) {
+        if (status != DeliveryStatus.PROCESSING) {
             throw new IllegalStateException("Only processing can retry");
         }
 
@@ -121,19 +120,42 @@ public class Delivery {
         status = DeliveryStatus.RETRY_SCHEDULED;
     }
 
-    public boolean tryStartRetry(Instant now)
-    {
+    public boolean tryStartRetry(Instant now) {
         Objects.requireNonNull(now);
 
-        if(status != DeliveryStatus.RETRY_SCHEDULED)
+        if (status != DeliveryStatus.RETRY_SCHEDULED)
             return false;
 
-        if(nextAttemptAt.isAfter(now))
+        if (nextAttemptAt.isAfter(now))
             return false;
 
         status = DeliveryStatus.PROCESSING;
         nextAttemptAt = null;
         return true;
     }
-}
 
+    public void requestReplay(int nextAttemptNumber) {
+        if (status != DeliveryStatus.FAILED) {
+            throw new IllegalStateException(
+                    "Only failed deliveries can be replayed.");
+        }
+
+        if (nextAttemptNumber <= retryCycleStartAttempt) {
+            throw new IllegalArgumentException(
+                    "Replay must start after the previous retry cycle.");
+        }
+
+        retryCycleStartAttempt = nextAttemptNumber;
+        nextAttemptAt = null;
+        status = DeliveryStatus.PENDING;
+
+    }
+
+    public int attemptNumberInCurrentCycle(int attemptNumber)
+    {
+        if(attemptNumber < retryCycleStartAttempt)
+            throw new IllegalArgumentException();
+
+        return attemptNumber - retryCycleStartAttempt + 1;
+    }
+}
