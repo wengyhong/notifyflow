@@ -7,9 +7,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.AmqpAdmin;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.QueueInformation;
-import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -22,11 +24,19 @@ import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(
         classes = DeliveryJobPublisherIntegrationTests.RabbitTestConfiguration.class,
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
-        properties = "spring.config.name=notifyflow-rabbitmq-integration-test")
+        properties = {
+                "spring.config.name=notifyflow-rabbitmq-integration-test",
+                "spring.rabbitmq.publisher-confirm-type=correlated",
+                "spring.rabbitmq.publisher-returns=true",
+                "spring.rabbitmq.template.mandatory=true"
+        })
 class DeliveryJobPublisherIntegrationTests {
 
     @Autowired
@@ -37,6 +47,26 @@ class DeliveryJobPublisherIntegrationTests {
 
     @Autowired
     private AmqpAdmin admin;
+
+    @Autowired
+    @Qualifier("deliveryBinding")
+    private Binding deliveryBinding;
+
+    @Test
+    void unroutablePublicationFailsInsteadOfReportingSuccess() {
+        assertNotNull(admin.getQueueInfo(DeliveryMessagingConfiguration.DELIVERY_QUEUE));
+        // This changes only the isolated test broker and the binding is restored afterward.
+        admin.removeBinding(deliveryBinding);
+        try {
+            AmqpException error = assertThrows(AmqpException.class,
+                    () -> publisher.publish(UUID.randomUUID()));
+
+            assertTrue(error.getMessage().contains("could not be routed"));
+            assertNull(rabbitTemplate.receive(DeliveryMessagingConfiguration.DELIVERY_QUEUE));
+        } finally {
+            admin.declareBinding(deliveryBinding);
+        }
+    }
 
 
 //     The test proceeds like this:

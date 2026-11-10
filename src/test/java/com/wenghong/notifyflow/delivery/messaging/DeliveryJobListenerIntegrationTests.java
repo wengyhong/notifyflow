@@ -37,7 +37,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @SpringBootTest(
         classes = DeliveryJobListenerIntegrationTests.RabbitTestConfiguration.class,
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
-        properties = "spring.config.name=notifyflow-rabbitmq-listener-integration-test")
+        properties = {
+                "spring.config.name=notifyflow-rabbitmq-listener-integration-test",
+                "spring.rabbitmq.publisher-confirm-type=correlated",
+                "spring.rabbitmq.publisher-returns=true",
+                "spring.rabbitmq.template.mandatory=true"
+        })
 class DeliveryJobListenerIntegrationTests {
 
     @Autowired

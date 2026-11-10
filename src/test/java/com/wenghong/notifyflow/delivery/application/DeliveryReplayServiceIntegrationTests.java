@@ -18,6 +18,8 @@ import com.wenghong.notifyflow.delivery.domain.DeliveryStatus;
 import com.wenghong.notifyflow.delivery.http.WebhookHttpSender;
 import com.wenghong.notifyflow.delivery.messaging.DeliveryJobPublisher;
 import com.wenghong.notifyflow.delivery.messaging.DeliveryRequestedEventListener;
+import com.wenghong.notifyflow.delivery.messaging.outbox.DeliveryOutboxMessage;
+import com.wenghong.notifyflow.delivery.messaging.outbox.DeliveryOutboxRepository;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryAttemptRepository;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
@@ -39,6 +41,7 @@ import org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -47,10 +50,12 @@ import tools.jackson.databind.json.JsonMapper;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -75,6 +80,8 @@ class DeliveryReplayServiceIntegrationTests {
     @Autowired private WebhookEndpointRepository endpoints;
     @Autowired private TransactionTemplate transactions;
 
+    @MockitoSpyBean private DeliveryOutboxRepository outbox;
+
     @MockitoBean private DeliveryJobPublisher publisher;
     @MockitoBean private WebhookHttpSender sender;
     @MockitoBean private RandomGenerator random;
@@ -88,6 +95,7 @@ class DeliveryReplayServiceIntegrationTests {
     @AfterEach
     void cleanUpCommittedRows() {
         // This test uses an isolated PostgreSQL container and commits its own transactions.
+        outbox.deleteAllInBatch();
         attempts.deleteAllInBatch();
         deliveries.deleteAllInBatch();
         events.deleteAllInBatch();
@@ -101,11 +109,12 @@ class DeliveryReplayServiceIntegrationTests {
         verifyNoInteractions(publisher, sender);
         assertEquals(0L, deliveries.count());
         assertEquals(0L, attempts.count());
+        assertEquals(0L, outbox.count());
     }
 
     @ParameterizedTest
     @ValueSource(ints = {1, 5})
-    void replayPreservesDeliveryAndHistoryAndPublishesOneJob(int previousAttempts) {
+    void replayPreservesDeliveryAndHistoryAndCreatesOneOutboxRequest(int previousAttempts) {
         Delivery original = saveFailedDelivery(previousAttempts);
         List<UUID> originalAttemptIds = attempts.findAll().stream().map(DeliveryAttempt::getId).toList();
 
@@ -129,8 +138,7 @@ class DeliveryReplayServiceIntegrationTests {
             assertEquals(NOW, previous.getCompletedAt());
             assertEquals(Integer.valueOf(previousAttempts == 1 ? 400 : 503), previous.getResponseStatus());
         }
-        verify(publisher).publish(original.getId());
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxRequests(original.getId(), 1);
         verifyNoInteractions(sender);
     }
 
@@ -147,6 +155,7 @@ class DeliveryReplayServiceIntegrationTests {
         assertEquals(status == DeliveryStatus.RETRY_SCHEDULED ? NOW.plusSeconds(60) : null,
                 persisted.getNextAttemptAt());
         assertEquals(0L, attempts.count());
+        assertEquals(0L, outbox.count());
         verifyNoInteractions(publisher, sender);
     }
 
@@ -160,22 +169,23 @@ class DeliveryReplayServiceIntegrationTests {
         assertEquals(DeliveryStatus.FAILED, persisted.getStatus());
         assertEquals(1, persisted.getRetryCycleStartAttempt());
         assertEquals(0L, attempts.count());
+        assertEquals(0L, outbox.count());
         verifyNoInteractions(publisher, sender);
     }
 
     @Test
-    void replayJobIsPublishedOnlyAfterEnclosingTransactionCommits() {
+    void replayStateAndOutboxRequestCommitTogetherWithoutPublishingToRabbitMq() {
         UUID id = saveFailedDelivery(5).getId();
 
         transactions.executeWithoutResult(status -> {
             Delivery replayed = service.replay(id).orElseThrow();
             assertEquals(DeliveryStatus.PENDING, replayed.getStatus());
+            assertEquals(0L, outbox.count());
             verifyNoInteractions(publisher);
         });
 
         assertEquals(DeliveryStatus.PENDING, deliveries.findById(id).orElseThrow().getStatus());
-        verify(publisher).publish(id);
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxRequests(id, 1);
     }
 
     @Test
@@ -193,11 +203,12 @@ class DeliveryReplayServiceIntegrationTests {
         assertEquals(1, persisted.getRetryCycleStartAttempt());
         assertNull(persisted.getNextAttemptAt());
         assertEquals(5L, attempts.count());
+        assertEquals(0L, outbox.count());
         verifyNoInteractions(publisher, sender);
     }
 
     @Test
-    void repeatedReplayRequestDoesNotPublishAnotherJob() {
+    void repeatedReplayRequestDoesNotCreateAnotherOutboxRequest() {
         UUID id = saveFailedDelivery(5).getId();
         service.replay(id).orElseThrow();
 
@@ -205,12 +216,11 @@ class DeliveryReplayServiceIntegrationTests {
 
         assertEquals(6, deliveries.findById(id).orElseThrow().getRetryCycleStartAttempt());
         assertEquals(5L, attempts.count());
-        verify(publisher).publish(id);
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxRequests(id, 1);
     }
 
     @Test
-    void concurrentReplayRequestsAcceptOnlyOneAndPublishOneJob() throws Exception {
+    void concurrentReplayRequestsAcceptOnlyOneAndCreateOneOutboxRequest() throws Exception {
         UUID id = saveFailedDelivery(5).getId();
         CyclicBarrier start = new CyclicBarrier(2);
         List<Delivery> accepted = new ArrayList<>();
@@ -245,8 +255,7 @@ class DeliveryReplayServiceIntegrationTests {
         assertEquals(DeliveryStatus.PENDING, persisted.getStatus());
         assertEquals(6, persisted.getRetryCycleStartAttempt());
         assertEquals(5L, attempts.count());
-        verify(publisher).publish(id);
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxRequests(id, 1);
     }
 
     @Test
@@ -255,6 +264,7 @@ class DeliveryReplayServiceIntegrationTests {
         when(sender.send(any(DeliveryWork.class))).thenReturn(204);
         service.replay(id).orElseThrow();
 
+        // Simulate consuming the queued delivery ID; outbox dispatch is tested separately.
         processing.process(id);
         processing.process(id);
 
@@ -312,7 +322,36 @@ class DeliveryReplayServiceIntegrationTests {
         processing.recordResponse(id, eleventh.attemptId(), 204);
         assertEquals(DeliveryStatus.DELIVERED, deliveries.findById(id).orElseThrow().getStatus());
         assertEquals(11L, attempts.count());
-        verify(publisher, times(2)).publish(id);
+        assertPendingOutboxRequests(id, 2);
+    }
+
+    @Test
+    void outboxStorageFailureRollsBackReplayStateAndCycleStart() {
+        UUID id = saveFailedDelivery(5).getId();
+        IllegalStateException failure = new IllegalStateException("Simulated outbox storage failure");
+        doThrow(failure).when(outbox).save(any(DeliveryOutboxMessage.class));
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> service.replay(id));
+
+        assertSame(failure, thrown);
+        Delivery persisted = deliveries.findById(id).orElseThrow();
+        assertEquals(DeliveryStatus.FAILED, persisted.getStatus());
+        assertEquals(1, persisted.getRetryCycleStartAttempt());
+        assertEquals(5L, attempts.count());
+        assertEquals(0L, outbox.count());
+        verifyNoInteractions(publisher, sender);
+    }
+
+    private void assertPendingOutboxRequests(UUID deliveryId, int expectedCount) {
+        List<DeliveryOutboxMessage> messages = outbox.findAll();
+        assertEquals(expectedCount, messages.size());
+        for (DeliveryOutboxMessage message : messages) {
+            assertNotNull(message.getId());
+            assertEquals(deliveryId, message.getDeliveryId());
+            assertNotNull(message.getCreatedAt());
+            assertNull(message.getPublishedAt());
+        }
+        verifyNoInteractions(publisher);
     }
 
     private Delivery saveFailedDelivery(int count) {

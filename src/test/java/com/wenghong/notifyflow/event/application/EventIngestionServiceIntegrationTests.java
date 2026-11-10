@@ -21,6 +21,8 @@ import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.domain.DeliveryStatus;
 import com.wenghong.notifyflow.delivery.messaging.DeliveryRequestedEventListener;
 import com.wenghong.notifyflow.delivery.messaging.DeliveryJobPublisher;
+import com.wenghong.notifyflow.delivery.messaging.outbox.DeliveryOutboxMessage;
+import com.wenghong.notifyflow.delivery.messaging.outbox.DeliveryOutboxRepository;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.domain.WebhookSubscription;
@@ -51,16 +53,17 @@ import tools.jackson.databind.json.JsonMapper;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
@@ -78,6 +81,9 @@ class EventIngestionServiceIntegrationTests {
 
     @MockitoBean
     private DeliveryJobPublisher publisher;
+
+    @MockitoSpyBean
+    private DeliveryOutboxRepository outbox;
 
     @Autowired
     private TransactionTemplate transactions;
@@ -101,6 +107,7 @@ class EventIngestionServiceIntegrationTests {
     void cleanUpCommittedRows() {
         // This test's PostgreSQL container is isolated from the development database.
         // Delete dependents first because the test deliberately commits its transactions.
+        outbox.deleteAllInBatch();
         deliveries.deleteAllInBatch();
         events.deleteAllInBatch();
         subscriptions.deleteAllInBatch();
@@ -109,7 +116,7 @@ class EventIngestionServiceIntegrationTests {
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void deliveryJobIsPublishedOnlyAfterEnclosingTransactionCommits() {
+    void deliveryAndOutboxRequestCommitTogetherWithoutPublishingToRabbitMq() {
         WebhookEndpoint warehouse = saveEndpoint("Warehouse", true);
         subscriptions.saveAndFlush(new WebhookSubscription(warehouse, "order.confirmed"));
 
@@ -119,19 +126,19 @@ class EventIngestionServiceIntegrationTests {
             Delivery delivery = deliveries.findAll().getFirst();
             assertNotNull(delivery.getId());
             // Ingestion has returned, but its enclosing transaction has not committed.
+            assertEquals(0L, outbox.count());
             verifyNoInteractions(publisher);
             return delivery.getId();
         });
 
         assertNotNull(deliveryId);
         assertTrue(deliveries.findById(deliveryId).isPresent());
-        verify(publisher).publish(deliveryId);
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxMessages(deliveryId);
     }
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void rollbackDiscardsDeliveryEventWithoutPublishingJob() {
+    void rollbackDiscardsDeliveryAndItsPendingOutboxRequest() {
         WebhookEndpoint warehouse = saveEndpoint("Warehouse", true);
         subscriptions.saveAndFlush(new WebhookSubscription(warehouse, "order.confirmed"));
 
@@ -147,12 +154,13 @@ class EventIngestionServiceIntegrationTests {
         verifyNoInteractions(publisher);
         assertEquals(0L, events.count());
         assertEquals(0L, deliveries.count());
+        assertEquals(0L, outbox.count());
         assertEquals(1L, subscriptions.count());
     }
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void ingestWithoutMatchingEnabledSubscriptionsDoesNotPublishJobs() {
+    void ingestWithoutMatchingEnabledSubscriptionsCreatesNoOutboxRequests() {
         WebhookEndpoint disabled = saveEndpoint("Disabled", false);
         WebhookEndpoint unrelated = saveEndpoint("Unrelated", true);
         subscriptions.saveAllAndFlush(List.of(
@@ -164,6 +172,7 @@ class EventIngestionServiceIntegrationTests {
 
         assertEquals(1L, events.count());
         assertEquals(0L, deliveries.count());
+        assertEquals(0L, outbox.count());
         verifyNoInteractions(publisher);
     }
 
@@ -237,8 +246,7 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(warehouse.getId(), delivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
         assertEquals(ACCEPTED_AT, delivery.getCreatedAt());
-        verify(publisher).publish(delivery.getId());
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxMessages(delivery.getId());
     }
 
     @Test
@@ -305,8 +313,7 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(warehouse.getId(), delivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
         assertEquals(ACCEPTED_AT, delivery.getCreatedAt());
-        verify(publisher).publish(delivery.getId());
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxMessages(delivery.getId());
     }
 
     @Test
@@ -334,8 +341,7 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(warehouse.getId(), remainingDelivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, remainingDelivery.getStatus());
         assertEquals(ACCEPTED_AT, remainingDelivery.getCreatedAt());
-        verify(publisher).publish(originalDelivery.getId());
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxMessages(originalDelivery.getId());
     }
 
     @Test
@@ -364,8 +370,7 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(warehouse.getId(), remainingDelivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, remainingDelivery.getStatus());
         assertEquals(ACCEPTED_AT, remainingDelivery.getCreatedAt());
-        verify(publisher).publish(originalDelivery.getId());
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxMessages(originalDelivery.getId());
     }
 
     @Test
@@ -403,8 +408,7 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(warehouse.getId(), remainingDelivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, remainingDelivery.getStatus());
         assertEquals(ACCEPTED_AT, remainingDelivery.getCreatedAt());
-        verify(publisher).publish(originalDelivery.getId());
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxMessages(originalDelivery.getId());
     }
 
     @Test
@@ -426,6 +430,7 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(0L, deliveries.count());
         // Setup was committed separately and survives the failed ingestion transaction.
         assertEquals(1L, subscriptions.count());
+        assertEquals(0L, outbox.count());
         verifyNoInteractions(publisher);
     }
 
@@ -467,9 +472,41 @@ class EventIngestionServiceIntegrationTests {
             assertEquals(persisted.getId(), delivery.getEvent().getId());
             assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
             assertEquals(ACCEPTED_AT, delivery.getCreatedAt());
-            verify(publisher).publish(delivery.getId());
         }
-        verifyNoMoreInteractions(publisher);
+        assertPendingOutboxMessages(persistedDeliveries.stream().map(Delivery::getId).toArray(UUID[]::new));
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void outboxStorageFailureRollsBackEventAndDeliveries() {
+        WebhookEndpoint warehouse = saveEndpoint("Warehouse", true);
+        subscriptions.saveAndFlush(new WebhookSubscription(warehouse, "order.confirmed"));
+        IllegalStateException failure = new IllegalStateException("Simulated outbox storage failure");
+        doThrow(failure).when(outbox).save(any(DeliveryOutboxMessage.class));
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> service.ingest("order.confirmed", JSON.readTree("{\"orderNumber\":\"128\"}"),
+                        "outbox-storage-failure"));
+
+        assertSame(failure, thrown);
+        assertEquals(0L, events.count());
+        assertEquals(0L, deliveries.count());
+        assertEquals(0L, outbox.count());
+        assertEquals(1L, subscriptions.count());
+        verifyNoInteractions(publisher);
+    }
+
+    private void assertPendingOutboxMessages(UUID... deliveryIds) {
+        List<DeliveryOutboxMessage> messages = outbox.findAll();
+        assertEquals(deliveryIds.length, messages.size());
+        assertEquals(Set.of(deliveryIds), messages.stream()
+                .map(DeliveryOutboxMessage::getDeliveryId).collect(Collectors.toSet()));
+        for (DeliveryOutboxMessage message : messages) {
+            assertNotNull(message.getId());
+            assertEquals(ACCEPTED_AT, message.getCreatedAt());
+            assertNull(message.getPublishedAt());
+        }
+        verifyNoInteractions(publisher);
     }
 
     private WebhookEndpoint saveEndpoint(String name, boolean enabled) {
