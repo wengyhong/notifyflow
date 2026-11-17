@@ -6,6 +6,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointService;
+import com.wenghong.notifyflow.endpoint.application.InvalidWebhookUrlException;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -34,11 +35,36 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @WebMvcTest(WebhookEndpointController.class)
 class WebhookEndpointControllerTests {
 
+    private static final String SIGNING_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
     @Autowired
     private MockMvc mockMvc;
 
     @MockitoBean
     private WebhookEndpointService service;
+
+    @Test
+    void policyRejectionReturnsBadRequestProblemDetail() throws Exception {
+        String url = "https://example.com/webhooks";
+        String detail = "Webhook URL must not contain credentials";
+        when(service.create("Orders", url))
+                .thenThrow(new InvalidWebhookUrlException(detail));
+
+        mockMvc.perform(post("/api/endpoints")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Orders","url":"https://example.com/webhooks"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.title").value("Bad Request"))
+                .andExpect(jsonPath("$.detail").value(detail))
+                .andExpect(jsonPath("$.instance").value("/api/endpoints"))
+                .andExpect(jsonPath("$.signingSecret").doesNotHaveJsonPath());
+
+        verify(service).create("Orders", url);
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
@@ -53,6 +79,7 @@ class WebhookEndpointControllerTests {
         when(endpoint.isEnabled()).thenReturn(enabled);
         when(endpoint.getCreatedAt()).thenReturn(createdAt);
         when(endpoint.getUpdatedAt()).thenReturn(updatedAt);
+        when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
         when(service.changeEnabled(id, enabled)).thenReturn(Optional.of(endpoint));
 
         mockMvc.perform(patch("/api/endpoints/{id}/enabled", id)
@@ -65,7 +92,8 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.url").value("https://example.com/webhooks"))
                 .andExpect(jsonPath("$.enabled").value(enabled))
                 .andExpect(jsonPath("$.createdAt").value(createdAt.toString()))
-                .andExpect(jsonPath("$.updatedAt").value(updatedAt.toString()));
+                .andExpect(jsonPath("$.updatedAt").value(updatedAt.toString()))
+                .andExpect(jsonPath("$.signingSecret").doesNotHaveJsonPath());
 
         verify(service).changeEnabled(id, enabled);
     }
@@ -161,6 +189,8 @@ class WebhookEndpointControllerTests {
         when(secondEndpoint.isEnabled()).thenReturn(false);
         when(secondEndpoint.getCreatedAt()).thenReturn(now);
         when(secondEndpoint.getUpdatedAt()).thenReturn(now);
+        when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
+        when(secondEndpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
         when(service.findAll(pageable))
                 .thenReturn(new PageImpl<>(List.of(endpoint, secondEndpoint), pageable, 5));
 
@@ -183,6 +213,8 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.content[1].enabled").value(false))
                 .andExpect(jsonPath("$.content[1].createdAt").value(now.toString()))
                 .andExpect(jsonPath("$.content[1].updatedAt").value(now.toString()))
+                .andExpect(jsonPath("$.content[0].signingSecret").doesNotHaveJsonPath())
+                .andExpect(jsonPath("$.content[1].signingSecret").doesNotHaveJsonPath())
                 .andExpect(jsonPath("$.page").value(1))
                 .andExpect(jsonPath("$.size").value(2))
                 .andExpect(jsonPath("$.totalElements").value(5))
@@ -222,6 +254,7 @@ class WebhookEndpointControllerTests {
         when(endpoint.getCreatedAt()).thenReturn(now);
         when(endpoint.getUpdatedAt()).thenReturn(now);
         when(service.findById(id)).thenReturn(Optional.of(endpoint));
+        when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
 
         mockMvc.perform(get("/api/endpoints/{id}", id))
                 .andExpect(status().isOk())
@@ -231,7 +264,8 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.url").value("https://example.com/webhooks"))
                 .andExpect(jsonPath("$.enabled").value(true))
                 .andExpect(jsonPath("$.createdAt").value(now.toString()))
-                .andExpect(jsonPath("$.updatedAt").value(now.toString()));
+                .andExpect(jsonPath("$.updatedAt").value(now.toString()))
+                .andExpect(jsonPath("$.signingSecret").doesNotHaveJsonPath());
 
         verify(service).findById(id);
     }
@@ -257,7 +291,7 @@ class WebhookEndpointControllerTests {
     }
 
     @Test
-    void createReturnsCreatedWithEndpointResponse() throws Exception {
+    void createReturnsCreatedWithSigningSecret() throws Exception {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         Instant now = Instant.parse("2026-10-28T00:00:00Z");
         WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
@@ -269,6 +303,7 @@ class WebhookEndpointControllerTests {
         when(endpoint.getUpdatedAt()).thenReturn(now);
         when(service.create("Orders", "https://example.com/webhooks"))
                 .thenReturn(endpoint);
+        when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
 
         mockMvc.perform(post("/api/endpoints")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -285,7 +320,8 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.url").value("https://example.com/webhooks"))
                 .andExpect(jsonPath("$.enabled").value(true))
                 .andExpect(jsonPath("$.createdAt").value(now.toString()))
-                .andExpect(jsonPath("$.updatedAt").value(now.toString()));
+                .andExpect(jsonPath("$.updatedAt").value(now.toString()))
+                .andExpect(jsonPath("$.signingSecret").value(SIGNING_SECRET));
 
         verify(service).create("Orders", "https://example.com/webhooks");
     }

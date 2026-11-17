@@ -28,6 +28,8 @@ import static org.mockito.Mockito.when;
 
 class WebhookSubscriptionServiceTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void createTranslatesDuplicateConstraintAndPreservesOriginalCause(boolean nested) {
@@ -37,7 +39,7 @@ class WebhookSubscriptionServiceTests {
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Warehouse", "https://example.com/webhooks",
-                Instant.parse("2026-10-29T00:00:00Z"));
+                Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         ConstraintViolationException violation = mock(ConstraintViolationException.class);
         when(violation.getConstraintName())
                 .thenReturn("uq_webhook_subscriptions_endpoint_event_type");
@@ -71,7 +73,7 @@ class WebhookSubscriptionServiceTests {
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Warehouse", "https://example.com/webhooks",
-                Instant.parse("2026-10-29T00:00:00Z"));
+                Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         ConstraintViolationException violation = mock(ConstraintViolationException.class);
         when(violation.getConstraintName()).thenReturn(constraintName);
         DataIntegrityViolationException failure =
@@ -96,7 +98,7 @@ class WebhookSubscriptionServiceTests {
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Warehouse", "https://example.com/webhooks",
-                Instant.parse("2026-10-29T00:00:00Z"));
+                Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         WebhookSubscription savedSubscription = new WebhookSubscription(endpoint, "order.confirmed");
         when(endpoints.findById(endpointId)).thenReturn(Optional.of(endpoint));
         when(subscriptions.saveAndFlush(any(WebhookSubscription.class)))
@@ -122,7 +124,7 @@ class WebhookSubscriptionServiceTests {
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Warehouse", "https://example.com/webhooks",
-                Instant.parse("2026-10-29T00:00:00Z"));
+                Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         DataIntegrityViolationException failure =
                 new DataIntegrityViolationException("Duplicate subscription");
         when(endpoints.findById(endpointId)).thenReturn(Optional.of(endpoint));

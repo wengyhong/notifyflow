@@ -31,6 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class WebhookSubscriptionRepositoryTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     @Autowired
     private WebhookSubscriptionRepository subscriptions;
 
@@ -162,7 +164,7 @@ class WebhookSubscriptionRepositoryTests {
     private WebhookEndpoint saveEndpoint(String name) {
         return endpoints.saveAndFlush(new WebhookEndpoint(
                 name, "https://example.com/webhooks",
-                Instant.parse("2026-10-29T00:00:00Z")));
+                Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET));
     }
 
     private void assertSqlState(DataIntegrityViolationException exception, String expected) {

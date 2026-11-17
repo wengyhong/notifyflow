@@ -73,6 +73,7 @@ class DeliveryProcessingServiceIntegrationTests {
 
     private static final Instant NOW = Instant.parse("2026-11-02T00:00:00Z");
     private static final JsonMapper JSON = JsonMapper.builder().build();
+    private static final String SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
     @Autowired
     private DeliveryProcessingService service;
@@ -115,6 +116,7 @@ class DeliveryProcessingServiceIntegrationTests {
             assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
             assertEquals(deliveryId, work.id());
             assertEquals("https://example.com/webhooks", work.url());
+            assertEquals(SIGNING_SECRET, work.signingSecret());
             assertEquals(JSON.readTree("{\"orderNumber\":\"128\"}"), work.payload());
             assertEquals(DeliveryStatus.PROCESSING,
                     deliveries.findById(deliveryId).orElseThrow().getStatus());
@@ -425,6 +427,7 @@ class DeliveryProcessingServiceIntegrationTests {
         assertEquals(1, claimed.size());
         assertEquals(deliveryId, claimed.getFirst().id());
         assertEquals("https://example.com/webhooks", claimed.getFirst().url());
+        assertEquals(SIGNING_SECRET, claimed.getFirst().signingSecret());
         assertEquals(JSON.readTree("{\"orderNumber\":\"128\"}"), claimed.getFirst().payload());
         assertEquals(1L, deliveries.count());
         assertEquals(DeliveryStatus.PROCESSING,
@@ -443,7 +446,7 @@ class DeliveryProcessingServiceIntegrationTests {
         Event event = events.saveAndFlush(new Event(
                 "order.confirmed", payload, "claim-request", NOW));
         WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(
-                "Warehouse", "https://example.com/webhooks", NOW));
+                "Warehouse", "https://example.com/webhooks", NOW, SIGNING_SECRET));
         UUID deliveryId = deliveries.saveAndFlush(new Delivery(event, endpoint, NOW)).getId();
 
         // No test transaction: claim must acquire the lock and commit independently.
@@ -452,6 +455,9 @@ class DeliveryProcessingServiceIntegrationTests {
         assertEquals(deliveryId, work.id());
         assertEquals("https://example.com/webhooks", work.url());
         assertEquals(payload, work.payload());
+        assertEquals(SIGNING_SECRET, work.signingSecret());
+        assertNull(work.previousSigningSecret());
+        assertNull(work.previousSigningSecretExpiresAt());
         assertEquals(1L, attempts.count());
         assertUnfinishedAttempt(work);
         Delivery persisted = deliveries.findById(deliveryId).orElseThrow();
@@ -463,6 +469,29 @@ class DeliveryProcessingServiceIntegrationTests {
                 deliveries.findById(deliveryId).orElseThrow().getStatus());
         assertEquals(1L, deliveries.count());
         assertEquals(1L, attempts.count());
+        assertUnfinishedAttempt(work);
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {-1, 3600})
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void claimCopiesBothSecretsAndExpiryWithoutDecidingSendTimeValidity(long secondsUntilExpiry) {
+        String nextSecret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        Instant expiry = NOW.plusSeconds(secondsUntilExpiry);
+        Event event = events.saveAndFlush(new Event(
+                "order.confirmed", JSON.readTree("{\"orderNumber\":\"128\"}"), "rotation-claim", NOW));
+        WebhookEndpoint endpoint = new WebhookEndpoint(
+                "Warehouse", "https://example.com/webhooks", NOW.minusSeconds(10000), SIGNING_SECRET);
+        endpoint.rotateSigningSecret(nextSecret, NOW.minusSeconds(7200), expiry);
+        endpoint = endpoints.saveAndFlush(endpoint);
+        UUID id = deliveries.saveAndFlush(new Delivery(event, endpoint, NOW)).getId();
+
+        DeliveryWork work = service.claim(id).orElseThrow();
+
+        assertEquals(id, work.id());
+        assertEquals(nextSecret, work.signingSecret());
+        assertEquals(SIGNING_SECRET, work.previousSigningSecret());
+        assertEquals(expiry, work.previousSigningSecretExpiresAt());
         assertUnfinishedAttempt(work);
     }
 
@@ -585,7 +614,7 @@ class DeliveryProcessingServiceIntegrationTests {
         }
         DeliveryAttempt current = attempts.saveAndFlush(new DeliveryAttempt(delivery, attemptNumber, NOW));
         return new DeliveryWork(delivery.getId(), current.getId(),
-                "https://example.com/webhooks", JSON.readTree("{\"orderNumber\":\"128\"}"));
+                "https://example.com/webhooks", JSON.readTree("{\"orderNumber\":\"128\"}"), SIGNING_SECRET, null, null);
     }
 
     private void assertRecordedAttempt(DeliveryWork work, int attemptNumber, DeliveryStatus status,
@@ -638,7 +667,7 @@ class DeliveryProcessingServiceIntegrationTests {
         Event event = events.saveAndFlush(new Event(
                 "order.confirmed", JSON.readTree("{\"orderNumber\":\"128\"}"), "claim-request", NOW));
         WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(
-                "Warehouse", "https://example.com/webhooks", NOW));
+                "Warehouse", "https://example.com/webhooks", NOW, SIGNING_SECRET));
         return deliveries.saveAndFlush(new Delivery(event, endpoint, NOW));
     }
 

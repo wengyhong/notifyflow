@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DeliveryTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     @Test
     void newDeliveryStartsInFirstRetryCycle() {
         assertEquals(1, newDelivery().getRetryCycleStartAttempt());
@@ -312,7 +314,7 @@ class DeliveryTests {
                 "order.confirmed", JsonMapper.builder().build().readTree("{\"orderNumber\":\"128\"}"),
                 "order-128-confirmed", now);
         WebhookEndpoint endpoint = new WebhookEndpoint(
-                "Warehouse", "https://example.com/webhooks", now);
+                "Warehouse", "https://example.com/webhooks", now, TEST_SIGNING_SECRET);
         return new Delivery(event, endpoint, now);
     }
 }

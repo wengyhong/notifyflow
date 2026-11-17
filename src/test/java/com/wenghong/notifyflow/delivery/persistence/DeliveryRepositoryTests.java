@@ -41,6 +41,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class DeliveryRepositoryTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     private static final Instant CREATED_AT = Instant.parse("2026-10-29T00:00:00Z");
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
@@ -305,7 +307,7 @@ class DeliveryRepositoryTests {
 
     private WebhookEndpoint saveEndpoint(String name) {
         return endpoints.saveAndFlush(new WebhookEndpoint(
-                name, "https://example.com/webhooks", CREATED_AT));
+                name, "https://example.com/webhooks", CREATED_AT, TEST_SIGNING_SECRET));
     }
 
     private int insertDelivery(UUID eventId, UUID endpointId, String status, Timestamp createdAt) {

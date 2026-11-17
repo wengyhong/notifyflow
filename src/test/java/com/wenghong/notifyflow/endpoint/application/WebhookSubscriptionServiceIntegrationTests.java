@@ -32,6 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class WebhookSubscriptionServiceIntegrationTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     @Autowired
     private WebhookEndpointRepository endpoints;
 
@@ -46,7 +48,7 @@ class WebhookSubscriptionServiceIntegrationTests {
     void duplicateIsTranslatedAndRolledBackWithoutPreventingLaterCreation() {
         UUID endpointId = endpoints.saveAndFlush(new WebhookEndpoint(
                 "Warehouse", "https://example.com/webhooks",
-                Instant.parse("2026-10-29T00:00:00Z"))).getId();
+                Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET)).getId();
         List<UUID> createdSubscriptions = new ArrayList<>();
 
         try {

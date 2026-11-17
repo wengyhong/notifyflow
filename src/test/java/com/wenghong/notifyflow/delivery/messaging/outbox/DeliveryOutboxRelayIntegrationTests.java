@@ -56,6 +56,8 @@ import static org.mockito.Mockito.when;
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class DeliveryOutboxRelayIntegrationTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     private static final Instant CREATED_AT = Instant.parse("2026-11-10T00:00:00Z");
     private static final Instant PUBLISHED_AT = CREATED_AT.plusSeconds(10);
     private static final JsonMapper JSON = JsonMapper.builder().build();
@@ -217,7 +219,7 @@ class DeliveryOutboxRelayIntegrationTests {
         Event event = events.saveAndFlush(new Event("order.confirmed",
                 JSON.readTree("{\"orderNumber\":\"128\"}"), UUID.randomUUID().toString(), CREATED_AT));
         WebhookEndpoint endpoint = endpoints.saveAndFlush(
-                new WebhookEndpoint("Warehouse", "https://example.com/webhooks", CREATED_AT));
+                new WebhookEndpoint("Warehouse", "https://example.com/webhooks", CREATED_AT, TEST_SIGNING_SECRET));
         Delivery delivery = deliveries.saveAndFlush(new Delivery(event, endpoint, CREATED_AT));
         return outbox.saveAndFlush(new DeliveryOutboxMessage(delivery.getId(), createdAt));
     }

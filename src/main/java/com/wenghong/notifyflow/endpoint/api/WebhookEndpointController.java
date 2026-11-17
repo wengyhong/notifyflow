@@ -7,8 +7,8 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
-import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -16,13 +16,15 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.wenghong.notifyflow.endpoint.application.InvalidWebhookUrlException;
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointService;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 
 import jakarta.validation.Valid;
+
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 
 @RestController
 @RequestMapping("/api/endpoints")
@@ -36,11 +38,18 @@ public class WebhookEndpointController {
 
     @PostMapping()
     @ResponseStatus(HttpStatus.CREATED)
-    public WebhookEndpointResponse create(
+    public WebhookEndpointCreatedResponse create(
             @RequestBody @Valid CreateWebhookEndpointRequest request) {
         WebhookEndpoint point = service.create(request.name(), request.url());
 
-        return toResponse(point);
+        return new WebhookEndpointCreatedResponse(
+                point.getId(),
+                point.getName(),
+                point.getUrl(),
+                point.isEnabled(),
+                point.getCreatedAt(),
+                point.getUpdatedAt(),
+                point.getSigningSecret());
 
     }
 
@@ -62,11 +71,9 @@ public class WebhookEndpointController {
 
     @PatchMapping("/{id}/enabled")
     public ResponseEntity<WebhookEndpointResponse> changeEnabled(
-        @PathVariable UUID id,
-        @Valid @RequestBody ChangeWebhookEndpointEnabledRequest request
-    )
-    {
-         return service.changeEnabled(id, request.enabled()).map(this::toResponse).map(ResponseEntity::ok)
+            @PathVariable UUID id,
+            @Valid @RequestBody ChangeWebhookEndpointEnabledRequest request) {
+        return service.changeEnabled(id, request.enabled()).map(this::toResponse).map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
@@ -78,5 +85,13 @@ public class WebhookEndpointController {
     private WebhookEndpointPageResponse toPageResponse(Page<WebhookEndpointResponse> page) {
         return new WebhookEndpointPageResponse(page.getContent(), page.getNumber(), page.getSize(),
                 page.getTotalElements(), page.getTotalPages());
+    }
+
+    @ExceptionHandler(InvalidWebhookUrlException.class)
+    public ProblemDetail handleInvalidWebhookUrl(
+            InvalidWebhookUrlException exception) {
+        return ProblemDetail.forStatusAndDetail(
+                HttpStatus.BAD_REQUEST,
+                exception.getMessage());
     }
 }

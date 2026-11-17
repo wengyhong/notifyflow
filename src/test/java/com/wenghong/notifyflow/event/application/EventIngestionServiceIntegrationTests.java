@@ -73,6 +73,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class EventIngestionServiceIntegrationTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     private static final Instant ACCEPTED_AT = Instant.parse("2026-10-29T10:00:00Z");
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
@@ -512,7 +514,7 @@ class EventIngestionServiceIntegrationTests {
     private WebhookEndpoint saveEndpoint(String name, boolean enabled) {
         Instant createdAt = ACCEPTED_AT.minusSeconds(60);
         WebhookEndpoint endpoint = new WebhookEndpoint(
-                name, "https://example.com/webhooks", createdAt);
+                name, "https://example.com/webhooks", createdAt, TEST_SIGNING_SECRET);
         endpoint.changeEnabled(enabled, createdAt);
         return endpoints.saveAndFlush(endpoint);
     }

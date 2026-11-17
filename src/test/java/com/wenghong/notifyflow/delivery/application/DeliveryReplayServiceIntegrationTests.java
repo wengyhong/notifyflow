@@ -69,6 +69,8 @@ import static org.mockito.Mockito.when;
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class DeliveryReplayServiceIntegrationTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     private static final Instant NOW = Instant.parse("2026-11-10T00:00:00Z");
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
@@ -368,7 +370,7 @@ class DeliveryReplayServiceIntegrationTests {
         Event event = events.saveAndFlush(new Event("order.confirmed",
                 JSON.readTree("{\"orderNumber\":\"128\"}"), UUID.randomUUID().toString(), NOW));
         WebhookEndpoint endpoint = endpoints.saveAndFlush(
-                new WebhookEndpoint("Warehouse", "https://example.com/webhooks", NOW));
+                new WebhookEndpoint("Warehouse", "https://example.com/webhooks", NOW, TEST_SIGNING_SECRET));
         Delivery delivery = new Delivery(event, endpoint, NOW);
         if (status != DeliveryStatus.PENDING) {
             delivery.tryStartProcessing();

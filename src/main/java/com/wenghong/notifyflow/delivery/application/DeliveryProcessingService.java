@@ -57,7 +57,9 @@ public class DeliveryProcessingService {
                     delivery.getId(),
                     attempt.getId(),
                     delivery.getEndpoint().getUrl(),
-                    delivery.getEvent().getPayload().deepCopy()));
+                    delivery.getEvent().getPayload().deepCopy(),
+                delivery.getEndpoint().getSigningSecret(),
+            delivery.getEndpoint().getPreviousSigningSecret(), delivery.getEndpoint().getPreviousSigningSecretExpiresAt()));
         }));
     }
 

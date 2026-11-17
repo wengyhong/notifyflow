@@ -15,6 +15,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class DeliveryAttemptTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     private static final Instant STARTED_AT = Instant.parse("2026-11-02T00:00:00Z");
     private static final Instant COMPLETED_AT = STARTED_AT.plusSeconds(2);
 
@@ -154,7 +156,7 @@ class DeliveryAttemptTests {
                 "order.confirmed", JsonMapper.builder().build().readTree("{\"orderNumber\":\"128\"}"),
                 "order-128-confirmed", STARTED_AT);
         WebhookEndpoint endpoint = new WebhookEndpoint(
-                "Warehouse", "https://example.com/webhooks", STARTED_AT);
+                "Warehouse", "https://example.com/webhooks", STARTED_AT, TEST_SIGNING_SECRET);
         return new Delivery(event, endpoint, STARTED_AT);
     }
 }

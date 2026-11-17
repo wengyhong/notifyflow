@@ -40,6 +40,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class DeliveryAttemptRepositoryTests {
 
+    private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     private static final Instant STARTED_AT = Instant.parse("2026-11-02T00:00:00Z");
     private static final Instant COMPLETED_AT = STARTED_AT.plusSeconds(2);
     private static final JsonMapper JSON = JsonMapper.builder().build();
@@ -228,7 +230,7 @@ class DeliveryAttemptRepositoryTests {
                 "order.confirmed", JSON.readTree("{\"orderNumber\":\"128\"}"),
                 UUID.randomUUID().toString(), STARTED_AT));
         WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(
-                "Warehouse", "https://example.com/webhooks", STARTED_AT));
+                "Warehouse", "https://example.com/webhooks", STARTED_AT, TEST_SIGNING_SECRET));
         Delivery delivery = new Delivery(event, endpoint, STARTED_AT);
         delivery.tryStartProcessing();
         return deliveries.saveAndFlush(delivery);
