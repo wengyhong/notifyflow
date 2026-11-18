@@ -5,7 +5,7 @@ import java.util.UUID;
 
 import com.wenghong.notifyflow.event.application.EventIngestionService;
 import com.wenghong.notifyflow.event.application.IdempotencyConflictException;
-import com.wenghong.notifyflow.event.domain.Event;
+import com.wenghong.notifyflow.event.application.EventSnapshot;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -17,7 +17,6 @@ import org.springframework.test.web.servlet.MockMvc;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -42,10 +41,7 @@ class EventControllerTests {
         JsonNode payload = JsonMapper.builder().build().readTree("{}");
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         Instant createdAt = Instant.parse("2026-10-30T00:00:00Z");
-        Event accepted = mock(Event.class);
-        when(accepted.getId()).thenReturn(id);
-        when(accepted.getEventType()).thenReturn(type);
-        when(accepted.getCreatedAt()).thenReturn(createdAt);
+        EventSnapshot accepted = new EventSnapshot(id, type, payload, createdAt);
         when(service.ingest(type, payload, key)).thenReturn(accepted);
 
         mockMvc.perform(post("/api/events")
@@ -194,10 +190,7 @@ class EventControllerTests {
         JsonNode payload = JsonMapper.builder().build().readTree("""
                 {"orderNumber":"128","items":[{"sku":"A","quantity":2}]}
                 """);
-        Event accepted = mock(Event.class);
-        when(accepted.getId()).thenReturn(id);
-        when(accepted.getEventType()).thenReturn("order.confirmed");
-        when(accepted.getCreatedAt()).thenReturn(createdAt);
+        EventSnapshot accepted = new EventSnapshot(id, "order.confirmed", payload, createdAt);
         when(service.ingest("order.confirmed", payload, key)).thenReturn(accepted);
 
         mockMvc.perform(post("/api/events")

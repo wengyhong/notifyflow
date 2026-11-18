@@ -31,6 +31,7 @@ import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookSubscriptionRepository;
 import com.wenghong.notifyflow.event.domain.Event;
 import com.wenghong.notifyflow.event.persistence.EventRepository;
+import com.wenghong.notifyflow.event.cache.EventIdempotencyCacheRequestedEventListener;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -59,16 +60,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.when;
 
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({PostgresTestConfiguration.class, EventIngestionService.class,
         DeliveryRequestedEventListener.class,
+        EventIdempotencyCacheRequestedEventListener.class,
         EventIngestionServiceIntegrationTests.FixedClockConfiguration.class})
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class EventIngestionServiceIntegrationTests {
@@ -83,6 +88,9 @@ class EventIngestionServiceIntegrationTests {
 
     @MockitoBean
     private DeliveryJobPublisher publisher;
+
+    @MockitoBean
+    private EventIdempotencyCache idempotencyCache;
 
     @MockitoSpyBean
     private DeliveryOutboxRepository outbox;
@@ -130,12 +138,15 @@ class EventIngestionServiceIntegrationTests {
             // Ingestion has returned, but its enclosing transaction has not committed.
             assertEquals(0L, outbox.count());
             verifyNoInteractions(publisher);
+            verify(idempotencyCache, never()).put(anyString(), any(EventSnapshot.class));
             return delivery.getId();
         });
 
         assertNotNull(deliveryId);
         assertTrue(deliveries.findById(deliveryId).isPresent());
         assertPendingOutboxMessages(deliveryId);
+        EventSnapshot committed = EventSnapshot.from(events.findByIdempotencyKey("publish-after-commit").orElseThrow());
+        verify(idempotencyCache).put("publish-after-commit", committed);
     }
 
     @Test
@@ -158,6 +169,7 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(0L, deliveries.count());
         assertEquals(0L, outbox.count());
         assertEquals(1L, subscriptions.count());
+        verify(idempotencyCache, never()).put(anyString(), any(EventSnapshot.class));
     }
 
     @Test
@@ -176,6 +188,8 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(0L, deliveries.count());
         assertEquals(0L, outbox.count());
         verifyNoInteractions(publisher);
+        EventSnapshot committed = EventSnapshot.from(events.findByIdempotencyKey("no-delivery-jobs").orElseThrow());
+        verify(idempotencyCache).put("no-delivery-jobs", committed);
     }
 
     @Test
@@ -202,12 +216,12 @@ class EventIngestionServiceIntegrationTests {
             return result;
         }).when(events).findByIdempotencyKey(key);
 
-        List<Event> successes = new ArrayList<>();
+        List<EventSnapshot> successes = new ArrayList<>();
         List<JsonNode> successfulPayloads = new ArrayList<>();
         List<Throwable> failures = new ArrayList<>();
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            List<Future<Event>> requests = List.of(
+            List<Future<EventSnapshot>> requests = List.of(
                     executor.submit(() -> service.ingest(
                             "order.confirmed", JSON.readTree(payloads.get(0)), key)),
                     executor.submit(() -> service.ingest(
@@ -235,16 +249,16 @@ class EventIngestionServiceIntegrationTests {
         verify(events, times(3)).findByIdempotencyKey(key);
         assertEquals(1L, events.count());
         assertEquals(1L, deliveries.count());
-        Event winner = successes.getFirst();
-        assertNotNull(winner.getId());
-        Event persisted = events.findById(winner.getId()).orElseThrow();
+        EventSnapshot winner = successes.getFirst();
+        assertNotNull(winner.id());
+        Event persisted = events.findById(winner.id()).orElseThrow();
         assertEquals(key, persisted.getIdempotencyKey());
         assertEquals("order.confirmed", persisted.getEventType());
-        assertEquals(successfulPayloads.getFirst(), winner.getPayload());
+        assertEquals(successfulPayloads.getFirst(), winner.payload());
         assertEquals(successfulPayloads.getFirst(), persisted.getPayload());
         assertEquals(ACCEPTED_AT, persisted.getCreatedAt());
         Delivery delivery = deliveries.findAll().getFirst();
-        assertEquals(winner.getId(), delivery.getEvent().getId());
+        assertEquals(winner.id(), delivery.getEvent().getId());
         assertEquals(warehouse.getId(), delivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
         assertEquals(ACCEPTED_AT, delivery.getCreatedAt());
@@ -280,13 +294,13 @@ class EventIngestionServiceIntegrationTests {
             return result;
         }).when(events).findByIdempotencyKey(key);
 
-        Event first;
-        Event second;
+        EventSnapshot first;
+        EventSnapshot second;
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<Event> firstRequest = executor.submit(
+            Future<EventSnapshot> firstRequest = executor.submit(
                     () -> service.ingest("order.confirmed", JSON.readTree(payloadJson), key));
-            Future<Event> secondRequest = executor.submit(
+            Future<EventSnapshot> secondRequest = executor.submit(
                     () -> service.ingest("order.confirmed", JSON.readTree(payloadJson), key));
 
             first = firstRequest.get(30, TimeUnit.SECONDS);
@@ -297,21 +311,21 @@ class EventIngestionServiceIntegrationTests {
                     "Ingestion workers did not finish before cleanup");
         }
 
-        assertNotNull(first.getId());
-        assertEquals(first.getId(), second.getId());
-        assertEquals(ACCEPTED_AT, first.getCreatedAt());
-        assertEquals(ACCEPTED_AT, second.getCreatedAt());
+        assertNotNull(first.id());
+        assertEquals(first.id(), second.id());
+        assertEquals(ACCEPTED_AT, first.createdAt());
+        assertEquals(ACCEPTED_AT, second.createdAt());
         // Two initial misses plus one recovery read proves the race path was reached.
         assertEquals(3, lookupCount.get());
         verify(events, times(3)).findByIdempotencyKey(key);
         assertEquals(1L, events.count());
         assertEquals(1L, deliveries.count());
-        Event persisted = events.findById(first.getId()).orElseThrow();
+        Event persisted = events.findById(first.id()).orElseThrow();
         assertEquals(key, persisted.getIdempotencyKey());
         assertEquals("order.confirmed", persisted.getEventType());
         assertEquals(JSON.readTree(payloadJson), persisted.getPayload());
         Delivery delivery = deliveries.findAll().getFirst();
-        assertEquals(first.getId(), delivery.getEvent().getId());
+        assertEquals(first.id(), delivery.getEvent().getId());
         assertEquals(warehouse.getId(), delivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, delivery.getStatus());
         assertEquals(ACCEPTED_AT, delivery.getCreatedAt());
@@ -324,7 +338,7 @@ class EventIngestionServiceIntegrationTests {
         WebhookEndpoint warehouse = saveEndpoint("Warehouse", true);
         subscriptions.saveAndFlush(new WebhookSubscription(warehouse, "order.confirmed"));
         JsonNode payload = JSON.readTree("{\"orderNumber\":\"128\"}");
-        Event original = service.ingest("order.confirmed", payload, "type-conflict-request");
+        EventSnapshot original = service.ingest("order.confirmed", payload, "type-conflict-request");
         Delivery originalDelivery = deliveries.findAll().getFirst();
 
         assertThrows(IdempotencyConflictException.class,
@@ -333,13 +347,13 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(1L, events.count());
         assertEquals(1L, deliveries.count());
         Event persisted = events.findByIdempotencyKey("type-conflict-request").orElseThrow();
-        assertEquals(original.getId(), persisted.getId());
+        assertEquals(original.id(), persisted.getId());
         assertEquals("order.confirmed", persisted.getEventType());
         assertEquals(payload, persisted.getPayload());
         assertEquals(ACCEPTED_AT, persisted.getCreatedAt());
         Delivery remainingDelivery = deliveries.findAll().getFirst();
         assertEquals(originalDelivery.getId(), remainingDelivery.getId());
-        assertEquals(original.getId(), remainingDelivery.getEvent().getId());
+        assertEquals(original.id(), remainingDelivery.getEvent().getId());
         assertEquals(warehouse.getId(), remainingDelivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, remainingDelivery.getStatus());
         assertEquals(ACCEPTED_AT, remainingDelivery.getCreatedAt());
@@ -353,7 +367,7 @@ class EventIngestionServiceIntegrationTests {
         subscriptions.saveAndFlush(new WebhookSubscription(warehouse, "order.confirmed"));
         JsonNode originalPayload = JSON.readTree("{\"orderNumber\":\"128\"}");
         JsonNode changedPayload = JSON.readTree("{\"orderNumber\":\"999\"}");
-        Event original = service.ingest("order.confirmed", originalPayload, "conflict-request");
+        EventSnapshot original = service.ingest("order.confirmed", originalPayload, "conflict-request");
         Delivery originalDelivery = deliveries.findAll().getFirst();
 
         assertThrows(IdempotencyConflictException.class,
@@ -362,13 +376,13 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(1L, events.count());
         assertEquals(1L, deliveries.count());
         Event persisted = events.findByIdempotencyKey("conflict-request").orElseThrow();
-        assertEquals(original.getId(), persisted.getId());
+        assertEquals(original.id(), persisted.getId());
         assertEquals("order.confirmed", persisted.getEventType());
         assertEquals(originalPayload, persisted.getPayload());
         assertEquals(ACCEPTED_AT, persisted.getCreatedAt());
         Delivery remainingDelivery = deliveries.findAll().getFirst();
         assertEquals(originalDelivery.getId(), remainingDelivery.getId());
-        assertEquals(original.getId(), remainingDelivery.getEvent().getId());
+        assertEquals(original.id(), remainingDelivery.getEvent().getId());
         assertEquals(warehouse.getId(), remainingDelivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, remainingDelivery.getStatus());
         assertEquals(ACCEPTED_AT, remainingDelivery.getCreatedAt());
@@ -391,22 +405,22 @@ class EventIngestionServiceIntegrationTests {
                 }
                 """);
 
-        Event original = service.ingest("order.confirmed", originalPayload, "retry-request");
+        EventSnapshot original = service.ingest("order.confirmed", originalPayload, "retry-request");
         Delivery originalDelivery = deliveries.findAll().getFirst();
 
-        Event retried = service.ingest("order.confirmed", retryPayload, "retry-request");
+        EventSnapshot retried = service.ingest("order.confirmed", retryPayload, "retry-request");
 
-        assertEquals(original.getId(), retried.getId());
-        assertEquals(ACCEPTED_AT, retried.getCreatedAt());
-        assertEquals(originalPayload, retried.getPayload());
+        assertEquals(original.id(), retried.id());
+        assertEquals(ACCEPTED_AT, retried.createdAt());
+        assertEquals(originalPayload, retried.payload());
         assertEquals(1L, events.count());
         assertEquals(1L, deliveries.count());
         Event persisted = events.findByIdempotencyKey("retry-request").orElseThrow();
-        assertEquals(original.getId(), persisted.getId());
-        assertEquals(original.getCreatedAt(), persisted.getCreatedAt());
+        assertEquals(original.id(), persisted.getId());
+        assertEquals(original.createdAt(), persisted.getCreatedAt());
         Delivery remainingDelivery = deliveries.findAll().getFirst();
         assertEquals(originalDelivery.getId(), remainingDelivery.getId());
-        assertEquals(original.getId(), remainingDelivery.getEvent().getId());
+        assertEquals(original.id(), remainingDelivery.getEvent().getId());
         assertEquals(warehouse.getId(), remainingDelivery.getEndpoint().getId());
         assertEquals(DeliveryStatus.PENDING, remainingDelivery.getStatus());
         assertEquals(ACCEPTED_AT, remainingDelivery.getCreatedAt());
@@ -453,12 +467,12 @@ class EventIngestionServiceIntegrationTests {
                 """);
 
         // There is no test transaction: ingest must commit its own transaction.
-        Event accepted = service.ingest("order.confirmed", payload, "order-128-confirmed");
+        EventSnapshot accepted = service.ingest("order.confirmed", payload, "order-128-confirmed");
 
         assertNotNull(accepted);
-        assertNotNull(accepted.getId());
+        assertNotNull(accepted.id());
         assertEquals(1L, events.count());
-        Event persisted = events.findById(accepted.getId()).orElseThrow();
+        Event persisted = events.findById(accepted.id()).orElseThrow();
         assertEquals("order.confirmed", persisted.getEventType());
         assertEquals("order-128-confirmed", persisted.getIdempotencyKey());
         assertEquals(payload, persisted.getPayload());
@@ -496,6 +510,78 @@ class EventIngestionServiceIntegrationTests {
         assertEquals(0L, outbox.count());
         assertEquals(1L, subscriptions.count());
         verifyNoInteractions(publisher);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void existingDatabaseEventRepopulatesCacheWithoutCreatingMoreRows() {
+        JsonNode payload = JSON.readTree("{\"number\":128}");
+        Event stored = events.saveAndFlush(new Event("order.confirmed", payload, "existing-cache-miss", ACCEPTED_AT));
+
+        EventSnapshot result = service.ingest("order.confirmed", payload, "existing-cache-miss");
+
+        assertEquals(stored.getId(), result.id());
+        verify(idempotencyCache).put("existing-cache-miss", result);
+        assertEquals(1L, events.count());
+        assertEquals(0L, deliveries.count());
+        assertEquals(0L, outbox.count());
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void existingEventReadInsideRolledBackTransactionDoesNotPopulateCache() {
+        JsonNode payload = JSON.readTree("{\"number\":128}");
+        events.saveAndFlush(new Event("order.confirmed", payload, "existing-rollback", ACCEPTED_AT));
+
+        transactions.executeWithoutResult(status -> {
+            service.ingest("order.confirmed", payload, "existing-rollback");
+            verify(idempotencyCache, never()).put(anyString(), any(EventSnapshot.class));
+            status.setRollbackOnly();
+        });
+
+        verify(idempotencyCache, never()).put(anyString(), any(EventSnapshot.class));
+        assertEquals(1L, events.count());
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void beforeCommitOutboxFailureNeverPopulatesIdempotencyCache() {
+        WebhookEndpoint warehouse = saveEndpoint("Warehouse", true);
+        subscriptions.saveAndFlush(new WebhookSubscription(warehouse, "order.confirmed"));
+        doThrow(new IllegalStateException("Test commit failure"))
+                .when(outbox).save(any(DeliveryOutboxMessage.class));
+
+        assertThrows(IllegalStateException.class, () -> transactions.executeWithoutResult(status -> {
+            // Publication occurs while this outer transaction is still open.
+            service.ingest("order.confirmed", JSON.readTree("{}"), "outer-commit-failure");
+            verify(idempotencyCache, never()).put(anyString(), any(EventSnapshot.class));
+        }));
+
+        verify(idempotencyCache, never()).put(anyString(), any(EventSnapshot.class));
+        assertEquals(0L, events.count());
+        assertEquals(0L, deliveries.count());
+        assertEquals(0L, outbox.count());
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void warmCacheRetrySkipsDatabaseLookupAndCreatesNoExtraDeliveries() {
+        WebhookEndpoint warehouse = saveEndpoint("Warehouse", true);
+        subscriptions.saveAndFlush(new WebhookSubscription(warehouse, "order.confirmed"));
+        String key = "warm-cache-retry";
+        JsonNode payload = JSON.readTree("{\"number\":128}");
+        EventSnapshot first = service.ingest("order.confirmed", payload, key);
+        verify(idempotencyCache).put(key, first);
+        when(idempotencyCache.findByKey(key)).thenReturn(Optional.of(first));
+
+        EventSnapshot second = service.ingest("order.confirmed", payload, key);
+
+        assertEquals(first, second);
+        verify(events).findByIdempotencyKey(key);
+        verify(idempotencyCache).put(key, first);
+        assertEquals(1L, events.count());
+        assertEquals(1L, deliveries.count());
+        assertPendingOutboxMessages(deliveries.findAll().getFirst().getId());
     }
 
     private void assertPendingOutboxMessages(UUID... deliveryIds) {

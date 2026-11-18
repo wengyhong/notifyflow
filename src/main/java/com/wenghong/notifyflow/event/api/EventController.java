@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.wenghong.notifyflow.event.application.EventIngestionService;
+import com.wenghong.notifyflow.event.application.EventSnapshot;
 import com.wenghong.notifyflow.event.application.IdempotencyConflictException;
 import com.wenghong.notifyflow.event.domain.Event;
 
@@ -36,15 +37,11 @@ public class EventController {
             @Valid @RequestBody CreateEventRequest request
 
     ) {
-        Event event = service.ingest(request.type(), request.payload(), idempotencyKey);
+        EventSnapshot event = service.ingest(request.type(), request.payload(), idempotencyKey);
 
         return toResponse(event);
     }
 
-    private EventAcceptedResponse toResponse(Event event) {
-        return new EventAcceptedResponse(event.getId(), event.getEventType(), event.getCreatedAt());
-
-    }
 
     @ExceptionHandler (IdempotencyConflictException.class)
     public ProblemDetail handleIdempotencyDetail(IdempotencyConflictException exception
@@ -52,5 +49,12 @@ public class EventController {
     {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, exception.getMessage());
     }
+
+    private EventAcceptedResponse toResponse(EventSnapshot event) {
+    return new EventAcceptedResponse(
+            event.id(),
+            event.eventType(),
+            event.createdAt());
+}
 
 }

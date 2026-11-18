@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -33,16 +35,18 @@ import static org.mockito.Mockito.verifyNoInteractions;
 class WebhookEndpointServiceTests {
 
     private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    private final ApplicationEventPublisher publisher = mock(ApplicationEventPublisher.class);
 
     @Test
     void changeEnabledEnablesDisabledEndpoint() {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class));
+        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class), publisher);
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Orders", "https://example.com/webhooks", createdAt, TEST_SIGNING_SECRET);
         endpoint.changeEnabled(false, createdAt.plusSeconds(60));
+        ReflectionTestUtils.setField(endpoint, "id", id);
         when(repository.findById(id)).thenReturn(Optional.of(endpoint));
 
         Optional<WebhookEndpoint> result = service.changeEnabled(id, true);
@@ -51,13 +55,14 @@ class WebhookEndpointServiceTests {
         assertTrue(endpoint.isEnabled());
         assertEquals(createdAt, endpoint.getCreatedAt());
         verify(repository).findById(id);
+        verify(publisher).publishEvent(new WebhookEndpointChangedEvent(id));
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void changeEnabledPreservesTimestampWhenStateAlreadyMatches(boolean enabled) {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class));
+        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class), publisher);
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
         WebhookEndpoint endpoint = new WebhookEndpoint(
@@ -73,13 +78,14 @@ class WebhookEndpointServiceTests {
         assertEquals(previousUpdatedAt, endpoint.getUpdatedAt());
         assertEquals(createdAt, endpoint.getCreatedAt());
         verify(repository).findById(id);
+        verifyNoInteractions(publisher);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void changeEnabledReturnsEmptyAndDoesNotSaveWhenEndpointIsMissing(boolean enabled) {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class));
+        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class), publisher);
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         when(repository.findById(id)).thenReturn(Optional.empty());
 
@@ -88,16 +94,18 @@ class WebhookEndpointServiceTests {
         assertTrue(result.isEmpty());
         verify(repository).findById(id);
         verify(repository, never()).save(any(WebhookEndpoint.class));
+        verifyNoInteractions(publisher);
     }
 
     @Test
     void changeEnabledDisablesFoundEndpoint() {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class));
+        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class), publisher);
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Orders", "https://example.com/webhooks", createdAt, TEST_SIGNING_SECRET);
+        ReflectionTestUtils.setField(endpoint, "id", id);
         when(repository.findById(id)).thenReturn(Optional.of(endpoint));
 
         Optional<WebhookEndpoint> result = service.changeEnabled(id, false);
@@ -106,12 +114,13 @@ class WebhookEndpointServiceTests {
         assertFalse(endpoint.isEnabled());
         assertEquals(createdAt, endpoint.getCreatedAt());
         verify(repository).findById(id);
+        verify(publisher).publishEvent(new WebhookEndpointChangedEvent(id));
     }
 
     @Test
     void findAllPassesPaginationToRepositoryAndReturnsItsPage() {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class));
+        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class), publisher);
         PageRequest pageable = PageRequest.of(0, 5, Sort.by("name").ascending());
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Orders", "https://example.com/webhooks",
@@ -128,7 +137,7 @@ class WebhookEndpointServiceTests {
     @Test
     void findByIdReturnsEndpointWhenFound() {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class));
+        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class), publisher);
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         WebhookEndpoint endpoint = new WebhookEndpoint(
                 "Orders", "https://example.com/webhooks",
@@ -144,7 +153,7 @@ class WebhookEndpointServiceTests {
     @Test
     void findByIdReturnsEmptyWhenEndpointDoesNotExist() {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class));
+        WebhookEndpointService service = new WebhookEndpointService(repository, mock(WebhookSecretGenerator.class), mock(WebhookUrlPolicy.class), publisher);
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         when(repository.findById(id)).thenReturn(Optional.empty());
 
@@ -159,7 +168,7 @@ class WebhookEndpointServiceTests {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
         WebhookSecretGenerator generator = mock(WebhookSecretGenerator.class);
         WebhookUrlPolicy policy = mock(WebhookUrlPolicy.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, generator, policy);
+        WebhookEndpointService service = new WebhookEndpointService(repository, generator, policy, publisher);
         String secret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         when(generator.generate()).thenReturn(secret);
         WebhookEndpoint savedEndpoint = new WebhookEndpoint(
@@ -189,6 +198,7 @@ class WebhookEndpointServiceTests {
         order.verify(policy).validate("https://example.com/webhooks");
         order.verify(generator).generate();
         order.verify(repository).save(submitted);
+        verifyNoInteractions(publisher);
     }
 
     @Test
@@ -196,7 +206,7 @@ class WebhookEndpointServiceTests {
         WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
         WebhookSecretGenerator generator = mock(WebhookSecretGenerator.class);
         WebhookUrlPolicy policy = mock(WebhookUrlPolicy.class);
-        WebhookEndpointService service = new WebhookEndpointService(repository, generator, policy);
+        WebhookEndpointService service = new WebhookEndpointService(repository, generator, policy, publisher);
         String url = "https://user:password@example.com/webhook";
         InvalidWebhookUrlException rejection = new InvalidWebhookUrlException(
                 "Webhook URL must not contain credentials");

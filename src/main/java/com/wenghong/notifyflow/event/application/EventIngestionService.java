@@ -22,7 +22,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 
 @Service
 public class EventIngestionService {
-
+    private final EventIdempotencyCache idempotencyCache;
     private final ApplicationEventPublisher eventPublisher;
     private EventRepository events;
     private WebhookSubscriptionRepository subscriptions;
@@ -32,13 +32,14 @@ public class EventIngestionService {
 
     public EventIngestionService(EventRepository events, WebhookSubscriptionRepository subscriptions,
             DeliveryRepository deliveries, Clock clock, TransactionTemplate transactions,
-            ApplicationEventPublisher eventPublisher) {
+            ApplicationEventPublisher eventPublisher, EventIdempotencyCache cache) {
         this.events = events;
         this.subscriptions = subscriptions;
         this.deliveries = deliveries;
         this.clock = clock;
         this.transactions = transactions;
         this.eventPublisher = eventPublisher;
+        this.idempotencyCache = cache;
     }
 
     // private Event createEventAndDeliveries(
@@ -82,10 +83,31 @@ public class EventIngestionService {
 
     }
 
-    public Event ingest(String eventType, JsonNode payload, String idempotencyKey) {
+    private EventSnapshot reuseExistingEvent(
+            EventSnapshot existing,
+            String eventType,
+            JsonNode payload) {
+        if (!existing.eventType().equals(eventType)
+                || !existing.payload().equals(payload)) {
+            throw new IdempotencyConflictException();
+        }
 
-        return events.findByIdempotencyKey(idempotencyKey).map(exist -> reuseExistingEvent(exist, eventType, payload))
+        return existing;
+    }
+
+    public EventSnapshot ingest(String eventType, JsonNode payload, String idempotencyKey) {
+
+        var cached = idempotencyCache.findByKey(idempotencyKey);
+        if (cached.isPresent()) {
+            return reuseExistingEvent(cached.get(), eventType, payload);
+        }
+        Event event = events.findByIdempotencyKey(idempotencyKey)
+                .map(exist -> reuseExistingEvent(exist, eventType, payload))
                 .orElseGet(() -> createOrReuseAfterRace(eventType, payload, idempotencyKey));
+
+        EventSnapshot snapshot = EventSnapshot.from(event);
+        eventPublisher.publishEvent(new EventIdempotencyCacheRequestedEvent(idempotencyKey, snapshot));
+        return snapshot;
 
     }
 

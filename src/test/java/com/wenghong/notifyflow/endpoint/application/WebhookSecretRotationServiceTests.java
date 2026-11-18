@@ -11,6 +11,8 @@ import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -24,8 +26,9 @@ class WebhookSecretRotationServiceTests {
     private static final String THIRD = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
     private final WebhookEndpointRepository repository = mock(WebhookEndpointRepository.class);
     private final WebhookSecretGenerator generator = mock(WebhookSecretGenerator.class);
+    private final ApplicationEventPublisher publisher = mock(ApplicationEventPublisher.class);
     private final WebhookSecretRotationService service = new WebhookSecretRotationService(
-            repository, generator, Clock.fixed(NOW, ZoneOffset.UTC));
+            repository, generator, Clock.fixed(NOW, ZoneOffset.UTC), publisher);
     private final UUID id = UUID.randomUUID();
 
     @Test
@@ -35,7 +38,7 @@ class WebhookSecretRotationServiceTests {
         assertTrue(service.rotate(id).isEmpty());
 
         verify(repository).findByIdForUpdate(id);
-        verifyNoInteractions(generator);
+        verifyNoInteractions(generator, publisher);
     }
 
     @Test
@@ -54,6 +57,7 @@ class WebhookSecretRotationServiceTests {
         order.verify(repository).findByIdForUpdate(id);
         order.verify(generator).generate();
         verify(repository, never()).save(any());
+        verify(publisher).publishEvent(new WebhookEndpointChangedEvent(id));
     }
 
     @Test
@@ -70,7 +74,7 @@ class WebhookSecretRotationServiceTests {
         assertEquals(ORIGINAL, endpoint.getPreviousSigningSecret());
         assertEquals(NOW.plusSeconds(60), endpoint.getPreviousSigningSecretExpiresAt());
         assertEquals(NOW.minusSeconds(60), endpoint.getUpdatedAt());
-        verifyNoInteractions(generator);
+        verifyNoInteractions(generator, publisher);
     }
 
     @ParameterizedTest
@@ -86,6 +90,7 @@ class WebhookSecretRotationServiceTests {
         assertEquals(THIRD, endpoint.getSigningSecret());
         assertEquals(NEXT, endpoint.getPreviousSigningSecret());
         assertEquals(NOW.plusSeconds(3600), endpoint.getPreviousSigningSecretExpiresAt());
+        verify(publisher).publishEvent(new WebhookEndpointChangedEvent(id));
     }
 
     @Test
@@ -100,6 +105,7 @@ class WebhookSecretRotationServiceTests {
         assertNull(endpoint.getPreviousSigningSecret());
         assertNull(endpoint.getPreviousSigningSecretExpiresAt());
         assertEquals(NOW.minusSeconds(7200), endpoint.getUpdatedAt());
+        verifyNoInteractions(publisher);
     }
 
     @Test
@@ -108,10 +114,13 @@ class WebhookSecretRotationServiceTests {
         when(repository.findByIdForUpdate(id)).thenThrow(failure);
 
         assertSame(failure, assertThrows(RuntimeException.class, () -> service.rotate(id)));
-        verifyNoInteractions(generator);
+        verifyNoInteractions(generator, publisher);
     }
 
     private WebhookEndpoint endpoint() {
-        return new WebhookEndpoint("Orders", "https://example.com/webhook", NOW.minusSeconds(7200), ORIGINAL);
+        WebhookEndpoint endpoint = new WebhookEndpoint(
+                "Orders", "https://example.com/webhook", NOW.minusSeconds(7200), ORIGINAL);
+        ReflectionTestUtils.setField(endpoint, "id", id);
+        return endpoint;
     }
 }

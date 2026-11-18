@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 
@@ -20,11 +21,14 @@ public class WebhookEndpointService {
     private final WebhookEndpointRepository repository;
     private final WebhookSecretGenerator generator;
 
+    private final ApplicationEventPublisher publisher;
     private final WebhookUrlPolicy policy;
 
-    public WebhookEndpointService(WebhookEndpointRepository repository,WebhookSecretGenerator generator, WebhookUrlPolicy policy) {
+    public WebhookEndpointService(WebhookEndpointRepository repository, WebhookSecretGenerator generator,
+            WebhookUrlPolicy policy, ApplicationEventPublisher publisher) {
         this.repository = repository;
         this.generator = generator;
+        this.publisher = publisher;
         this.policy = policy;
     }
 
@@ -52,14 +56,17 @@ public class WebhookEndpointService {
     public Optional<WebhookEndpoint> changeEnabled(UUID id, boolean enabled) {
         Optional<WebhookEndpoint> point = repository.findById(id);
 
-        if (point.isPresent())
             return point.map(endpoint -> {
-                endpoint.changeEnabled(enabled, Instant.now());
+               if (endpoint.isEnabled() != enabled) {
+            endpoint.changeEnabled(enabled, Instant.now());
+
+            publisher.publishEvent(
+                    new WebhookEndpointChangedEvent(endpoint.getId()));
+        }
 
                 return endpoint;
             });
 
-        return Optional.empty();
-    }
+}
 
 }

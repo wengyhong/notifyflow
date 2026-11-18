@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,11 +18,14 @@ public class WebhookSecretRotationService {
     private final WebhookEndpointRepository repository;
     private final WebhookSecretGenerator generator;
     private final Clock clock;
+    private final ApplicationEventPublisher publisher;
+
     public WebhookSecretRotationService(WebhookEndpointRepository repository, WebhookSecretGenerator generator,
-            Clock clock) {
+            Clock clock, ApplicationEventPublisher publisher) {
         this.repository = repository;
         this.generator = generator;
         this.clock = clock;
+        this.publisher = publisher;
     }
 
     @Transactional
@@ -35,6 +39,7 @@ public class WebhookSecretRotationService {
                 throw new SecretRotationInProgressException();
 
             endpoint.rotateSigningSecret(generator.generate(), now, now.plusSeconds(3600));
+            publisher.publishEvent(new WebhookEndpointChangedEvent(endpoint.getId()));
 
             return endpoint;
 

@@ -4,6 +4,13 @@ NotifyFlow uses Redis to coordinate delivery permits per webhook endpoint.
 PostgreSQL remains authoritative for events, delivery state, attempt history,
 and retry schedules. Redis stores short-lived counters, not delivery jobs.
 
+For the separate Redis cache used by endpoint detail reads, see
+[endpoint caching](endpoint-caching.md), including its PostgreSQL fallback and
+after-commit invalidation behavior.
+
+For cached repeat-event lookups and their durable PostgreSQL conflict checks,
+see [event idempotency caching](idempotency-caching.md).
+
 ## Current policy
 
 `RedisDeliveryRateLimiter` permits five acquisitions per endpoint in a

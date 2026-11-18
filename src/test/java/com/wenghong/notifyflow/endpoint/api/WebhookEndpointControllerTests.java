@@ -6,6 +6,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointService;
+import com.wenghong.notifyflow.endpoint.application.WebhookEndpointQueryService;
+import com.wenghong.notifyflow.endpoint.application.WebhookEndpointSnapshot;
 import com.wenghong.notifyflow.endpoint.application.InvalidWebhookUrlException;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import org.junit.jupiter.api.Test;
@@ -42,6 +44,9 @@ class WebhookEndpointControllerTests {
 
     @MockitoBean
     private WebhookEndpointService service;
+
+    @MockitoBean
+    private WebhookEndpointQueryService queryService;
 
     @Test
     void policyRejectionReturnsBadRequestProblemDetail() throws Exception {
@@ -242,19 +247,15 @@ class WebhookEndpointControllerTests {
         verify(service).findAll(pageable);
     }
 
-    @Test
-    void findByIdReturnsEndpointResponseWhenFound() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void findByIdReturnsSnapshotResponseFromQueryService(boolean enabled) throws Exception {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         Instant now = Instant.parse("2026-10-28T00:00:00Z");
-        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
-        when(endpoint.getId()).thenReturn(id);
-        when(endpoint.getName()).thenReturn("Orders");
-        when(endpoint.getUrl()).thenReturn("https://example.com/webhooks");
-        when(endpoint.isEnabled()).thenReturn(true);
-        when(endpoint.getCreatedAt()).thenReturn(now);
-        when(endpoint.getUpdatedAt()).thenReturn(now);
-        when(service.findById(id)).thenReturn(Optional.of(endpoint));
-        when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
+        Instant updated = now.plusSeconds(60);
+        WebhookEndpointSnapshot snapshot = new WebhookEndpointSnapshot(
+                id, "Orders", "https://example.com/webhooks", enabled, now, updated);
+        when(queryService.findById(id)).thenReturn(Optional.of(snapshot));
 
         mockMvc.perform(get("/api/endpoints/{id}", id))
                 .andExpect(status().isOk())
@@ -262,24 +263,28 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.id").value(id.toString()))
                 .andExpect(jsonPath("$.name").value("Orders"))
                 .andExpect(jsonPath("$.url").value("https://example.com/webhooks"))
-                .andExpect(jsonPath("$.enabled").value(true))
+                .andExpect(jsonPath("$.enabled").value(enabled))
                 .andExpect(jsonPath("$.createdAt").value(now.toString()))
-                .andExpect(jsonPath("$.updatedAt").value(now.toString()))
-                .andExpect(jsonPath("$.signingSecret").doesNotHaveJsonPath());
+                .andExpect(jsonPath("$.updatedAt").value(updated.toString()))
+                .andExpect(jsonPath("$.signingSecret").doesNotHaveJsonPath())
+                .andExpect(jsonPath("$.previousSigningSecret").doesNotHaveJsonPath())
+                .andExpect(jsonPath("$.previousSigningSecretExpiresAt").doesNotHaveJsonPath());
 
-        verify(service).findById(id);
+        verify(queryService).findById(id);
+        verifyNoInteractions(service);
     }
 
     @Test
     void findByIdReturnsNotFoundWhenEndpointDoesNotExist() throws Exception {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        when(service.findById(id)).thenReturn(Optional.empty());
+        when(queryService.findById(id)).thenReturn(Optional.empty());
 
         mockMvc.perform(get("/api/endpoints/{id}", id))
                 .andExpect(status().isNotFound())
                 .andExpect(content().string(""));
 
-        verify(service).findById(id);
+        verify(queryService).findById(id);
+        verifyNoInteractions(service);
     }
 
     @Test
@@ -287,7 +292,7 @@ class WebhookEndpointControllerTests {
         mockMvc.perform(get("/api/endpoints/{id}", "not-a-uuid"))
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(service);
+        verifyNoInteractions(service, queryService);
     }
 
     @Test
