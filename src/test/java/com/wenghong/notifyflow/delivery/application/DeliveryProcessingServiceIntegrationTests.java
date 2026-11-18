@@ -2,6 +2,7 @@ package com.wenghong.notifyflow.delivery.application;
 
 import java.io.IOException;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -26,6 +27,7 @@ import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
 import com.wenghong.notifyflow.event.domain.Event;
 import com.wenghong.notifyflow.event.persistence.EventRepository;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -59,6 +61,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -84,6 +88,12 @@ class DeliveryProcessingServiceIntegrationTests {
     @MockitoBean
     private RandomGenerator random;
 
+    @MockitoBean
+    private DeliveryRateLimiter rateLimiter;
+
+    @MockitoSpyBean
+    private Clock clock;
+
     @Autowired
     private DeliveryRepository deliveries;
 
@@ -95,6 +105,12 @@ class DeliveryProcessingServiceIntegrationTests {
 
     @Autowired
     private WebhookEndpointRepository endpoints;
+
+    @BeforeEach
+    void allowDeliveriesByDefault() {
+        when(rateLimiter.tryAcquire(any(UUID.class)))
+                .thenReturn(new DeliveryRateLimitDecision(true, Duration.ZERO));
+    }
 
     @AfterEach
     void cleanUpCommittedRows() {
@@ -301,6 +317,7 @@ class DeliveryProcessingServiceIntegrationTests {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void claimReturnsEmptyForMissingDelivery() {
         assertTrue(service.claim(UUID.randomUUID()).isEmpty());
+        verifyNoInteractions(rateLimiter);
         assertEquals(0L, deliveries.count());
         assertEquals(0L, attempts.count());
     }
@@ -380,6 +397,7 @@ class DeliveryProcessingServiceIntegrationTests {
         assertEquals(NOW, persisted.getCreatedAt());
         assertEquals(1L, deliveries.count());
         assertEquals(0L, attempts.count());
+        verifyNoInteractions(rateLimiter);
     }
 
     @ParameterizedTest
@@ -601,6 +619,138 @@ class DeliveryProcessingServiceIntegrationTests {
         assertEquals(networkFailure ? "Connection timed out" : null, attempt.getErrorMessage());
         assertEquals(2L, attempts.count());
         verify(random).nextLong(2001L);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void rateLimitedProcessReschedulesWithoutHttpOrAttempt() throws Exception {
+        Delivery delivery = savePendingDelivery();
+        UUID endpointId = delivery.getEndpoint().getId();
+        when(rateLimiter.tryAcquire(endpointId))
+                .thenReturn(new DeliveryRateLimitDecision(false, Duration.ofMillis(250)));
+
+        service.process(delivery.getId());
+
+        Delivery stored = deliveries.findById(delivery.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, stored.getStatus());
+        assertEquals(NOW.plusMillis(250), stored.getNextAttemptAt());
+        assertEquals(NOW, stored.getCreatedAt());
+        assertEquals(1, stored.getRetryCycleStartAttempt());
+        assertEquals(0L, attempts.count());
+        verify(rateLimiter).tryAcquire(endpointId);
+        verify(attempts, never()).findFirstByDelivery_IdOrderByAttemptNumberDesc(delivery.getId());
+        verify(attempts, never()).saveAndFlush(any(DeliveryAttempt.class));
+        verifyNoInteractions(sender);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void deferredDeliveryWaitsUntilDueThenCreatesItsFirstAttempt() {
+        Delivery delivery = savePendingDelivery();
+        UUID endpointId = delivery.getEndpoint().getId();
+        when(rateLimiter.tryAcquire(endpointId)).thenReturn(
+                new DeliveryRateLimitDecision(false, Duration.ofSeconds(1)),
+                new DeliveryRateLimitDecision(true, Duration.ZERO));
+
+        assertTrue(service.claim(delivery.getId()).isEmpty());
+        assertTrue(service.claim(delivery.getId()).isEmpty());
+        verify(rateLimiter).tryAcquire(endpointId);
+        assertEquals(0L, attempts.count());
+        assertEquals(NOW.plusSeconds(1),
+                deliveries.findById(delivery.getId()).orElseThrow().getNextAttemptAt());
+
+        when(clock.instant()).thenReturn(NOW.plusSeconds(1));
+        DeliveryWork work = service.claim(delivery.getId()).orElseThrow();
+
+        DeliveryAttempt attempt = attempts.findById(work.attemptId()).orElseThrow();
+        assertEquals(1, attempt.getAttemptNumber());
+        assertEquals(NOW.plusSeconds(1), attempt.getStartedAt());
+        assertNull(attempt.getCompletedAt());
+        assertEquals(1L, attempts.count());
+        Delivery stored = deliveries.findById(delivery.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.PROCESSING, stored.getStatus());
+        assertNull(stored.getNextAttemptAt());
+        verify(rateLimiter, times(2)).tryAcquire(endpointId);
+        verifyNoInteractions(sender);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void repeatedRateLimitDeferralsPreserveAttemptHistoryAndRetryBudget() {
+        DeliveryWork fourth = saveProcessingAttempt(4);
+        DeliveryAttempt previous = attempts.findById(fourth.attemptId()).orElseThrow();
+        previous.completeWithResponse(503, NOW);
+        attempts.saveAndFlush(previous);
+        Delivery delivery = deliveries.findById(fourth.id()).orElseThrow();
+        delivery.scheduleRetry(NOW);
+        deliveries.saveAndFlush(delivery);
+        UUID endpointId = delivery.getEndpoint().getId();
+        when(rateLimiter.tryAcquire(endpointId)).thenReturn(
+                new DeliveryRateLimitDecision(false, Duration.ofSeconds(1)),
+                new DeliveryRateLimitDecision(false, Duration.ofSeconds(1)),
+                new DeliveryRateLimitDecision(false, Duration.ofSeconds(1)),
+                new DeliveryRateLimitDecision(true, Duration.ZERO));
+
+        for (int second = 0; second < 3; second++) {
+            when(clock.instant()).thenReturn(NOW.plusSeconds(second));
+            assertTrue(service.claim(delivery.getId()).isEmpty());
+            Delivery stored = deliveries.findById(delivery.getId()).orElseThrow();
+            assertEquals(DeliveryStatus.RETRY_SCHEDULED, stored.getStatus());
+            assertEquals(NOW.plusSeconds(second + 1), stored.getNextAttemptAt());
+            assertEquals(1, stored.getRetryCycleStartAttempt());
+            assertEquals(4L, attempts.count());
+        }
+
+        when(clock.instant()).thenReturn(NOW.plusSeconds(3));
+        DeliveryWork fifth = service.claim(delivery.getId()).orElseThrow();
+        assertEquals(5, attempts.findById(fifth.attemptId()).orElseThrow().getAttemptNumber());
+        service.recordResponse(fifth.id(), fifth.attemptId(), 503);
+
+        Delivery stored = deliveries.findById(delivery.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.FAILED, stored.getStatus());
+        assertNull(stored.getNextAttemptAt());
+        assertEquals(1, stored.getRetryCycleStartAttempt());
+        assertEquals(5L, attempts.count());
+        assertEquals(Integer.valueOf(503),
+                attempts.findById(fourth.attemptId()).orElseThrow().getResponseStatus());
+        verify(rateLimiter, times(4)).tryAcquire(endpointId);
+        verifyNoInteractions(sender);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void deferralStartsFromClockReadingAfterLimiterReturns() {
+        Delivery delivery = savePendingDelivery();
+        when(rateLimiter.tryAcquire(delivery.getEndpoint().getId())).thenAnswer(invocation -> {
+            // Redis may take time to respond; its retry delay starts after that wait.
+            when(clock.instant()).thenReturn(NOW.plusSeconds(2));
+            return new DeliveryRateLimitDecision(false, Duration.ofSeconds(1));
+        });
+
+        assertTrue(service.claim(delivery.getId()).isEmpty());
+
+        Delivery stored = deliveries.findById(delivery.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, stored.getStatus());
+        assertEquals(NOW.plusSeconds(3), stored.getNextAttemptAt());
+        assertEquals(0L, attempts.count());
+        verifyNoInteractions(sender);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void unexpectedLimiterFailureRollsBackClaim() {
+        Delivery delivery = savePendingDelivery();
+        IllegalStateException failure = new IllegalStateException("Unexpected limiter failure");
+        when(rateLimiter.tryAcquire(delivery.getEndpoint().getId())).thenThrow(failure);
+
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> service.claim(delivery.getId())));
+
+        Delivery stored = deliveries.findById(delivery.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.PENDING, stored.getStatus());
+        assertNull(stored.getNextAttemptAt());
+        assertEquals(0L, attempts.count());
+        verifyNoInteractions(sender);
     }
 
     private DeliveryWork saveProcessingAttempt(int attemptNumber) {

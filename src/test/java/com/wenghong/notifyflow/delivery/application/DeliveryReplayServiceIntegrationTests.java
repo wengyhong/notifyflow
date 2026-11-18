@@ -1,6 +1,7 @@
 package com.wenghong.notifyflow.delivery.application;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -88,10 +89,13 @@ class DeliveryReplayServiceIntegrationTests {
     @MockitoBean private WebhookHttpSender sender;
     @MockitoBean private RandomGenerator random;
     @MockitoBean private Clock clock;
+    @MockitoBean private DeliveryRateLimiter rateLimiter;
 
     @BeforeEach
     void fixCurrentTime() {
         when(clock.instant()).thenReturn(NOW);
+        when(rateLimiter.tryAcquire(any(UUID.class)))
+                .thenReturn(new DeliveryRateLimitDecision(true, Duration.ZERO));
     }
 
     @AfterEach
@@ -325,6 +329,37 @@ class DeliveryReplayServiceIntegrationTests {
         assertEquals(DeliveryStatus.DELIVERED, deliveries.findById(id).orElseThrow().getStatus());
         assertEquals(11L, attempts.count());
         assertPendingOutboxRequests(id, 2);
+    }
+
+    @Test
+    void rateLimitedReplayPreservesItsNewCycleAndResumesAtSixthLifetimeAttempt() throws Exception {
+        Delivery original = saveFailedDelivery(5);
+        UUID id = original.getId();
+        service.replay(id).orElseThrow();
+        when(rateLimiter.tryAcquire(original.getEndpoint().getId())).thenReturn(
+                new DeliveryRateLimitDecision(false, Duration.ofSeconds(1)),
+                new DeliveryRateLimitDecision(true, Duration.ZERO));
+
+        processing.process(id);
+
+        Delivery deferred = deliveries.findById(id).orElseThrow();
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, deferred.getStatus());
+        assertEquals(NOW.plusSeconds(1), deferred.getNextAttemptAt());
+        assertEquals(6, deferred.getRetryCycleStartAttempt());
+        assertEquals(5L, attempts.count());
+        verifyNoInteractions(sender);
+
+        when(clock.instant()).thenReturn(NOW.plusSeconds(1));
+        DeliveryWork work = processing.claim(id).orElseThrow();
+        assertEquals(6, attempts.findById(work.attemptId()).orElseThrow().getAttemptNumber());
+        processing.recordResponse(id, work.attemptId(), 503);
+
+        Delivery stored = deliveries.findById(id).orElseThrow();
+        assertEquals(DeliveryStatus.RETRY_SCHEDULED, stored.getStatus());
+        assertEquals(NOW.plusSeconds(6), stored.getNextAttemptAt());
+        assertEquals(6, stored.getRetryCycleStartAttempt());
+        assertEquals(6L, attempts.count());
+        assertPendingOutboxRequests(id, 1);
     }
 
     @Test

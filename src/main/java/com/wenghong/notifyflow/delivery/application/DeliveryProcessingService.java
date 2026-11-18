@@ -20,6 +20,7 @@ import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 public class DeliveryProcessingService {
 
     private final DeliveryRetryPolicy retryPolicy;
+    private final DeliveryRateLimiter rateLimiter;
     private final TransactionTemplate transactions;
 
     private final WebhookHttpSender sender;
@@ -30,13 +31,15 @@ public class DeliveryProcessingService {
 
     public DeliveryProcessingService(DeliveryRepository repository, Clock clock, TransactionTemplate transactions,
             DeliveryAttemptRepository attempts, WebhookHttpSender sender,
-            DeliveryRetryPolicy retryPolicy) {
+            DeliveryRetryPolicy retryPolicy,
+            DeliveryRateLimiter rateLimiter) {
         this.repository = repository;
         this.clock = clock;
         this.transactions = transactions;
         this.attempts = attempts;
         this.sender = sender;
         this.retryPolicy = retryPolicy;
+        this.rateLimiter = rateLimiter;
     }
 
     public Optional<DeliveryWork> claim(UUID deliveryId) {
@@ -45,6 +48,14 @@ public class DeliveryProcessingService {
             Instant now = Instant.now(clock);
 
             if (!delivery.tryStartProcessing() && !delivery.tryStartRetry(now)) {
+                return Optional.empty();
+            }
+
+            DeliveryRateLimitDecision decision = rateLimiter.tryAcquire(delivery.getEndpoint().getId());
+
+            if (!decision.allowed()) {
+                Instant retryAt = clock.instant().plus(decision.retryAfter());
+                delivery.scheduleRetry(retryAt);
                 return Optional.empty();
             }
 
@@ -58,8 +69,9 @@ public class DeliveryProcessingService {
                     attempt.getId(),
                     delivery.getEndpoint().getUrl(),
                     delivery.getEvent().getPayload().deepCopy(),
-                delivery.getEndpoint().getSigningSecret(),
-            delivery.getEndpoint().getPreviousSigningSecret(), delivery.getEndpoint().getPreviousSigningSecretExpiresAt()));
+                    delivery.getEndpoint().getSigningSecret(),
+                    delivery.getEndpoint().getPreviousSigningSecret(),
+                    delivery.getEndpoint().getPreviousSigningSecretExpiresAt()));
         }));
     }
 
@@ -77,7 +89,6 @@ public class DeliveryProcessingService {
             }
 
             int cycleAttemptNumber = delivery.attemptNumberInCurrentCycle(attempt.getAttemptNumber());
-
 
             Instant now = Instant.now(clock);
 
@@ -116,11 +127,10 @@ public class DeliveryProcessingService {
                 throw new IllegalArgumentException("Attempt does not belong to this delivery.");
             }
 
-            int cycleAttemptNumber =
-        delivery.attemptNumberInCurrentCycle(attempt.getAttemptNumber());
+            int cycleAttemptNumber = delivery.attemptNumberInCurrentCycle(attempt.getAttemptNumber());
             Instant now = Instant.now(clock);
 
-            attempt.completeWithFailure(errorMessage,now);
+            attempt.completeWithFailure(errorMessage, now);
 
             if (retryPolicy.canRetry(cycleAttemptNumber)) {
                 delivery.scheduleRetry(
