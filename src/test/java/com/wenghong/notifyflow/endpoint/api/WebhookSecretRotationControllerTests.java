@@ -12,6 +12,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
+import com.wenghong.notifyflow.identity.configuration.SecurityConfiguration;
+import org.springframework.security.test.context.support.WithMockUser;
+import org.springframework.security.test.context.support.WithAnonymousUser;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -20,6 +24,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -30,7 +35,29 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(WebhookSecretRotationController.class)
+@Import(SecurityConfiguration.class)
+@WithMockUser(roles = {})
 class WebhookSecretRotationControllerTests {
+
+    @Test
+    @WithAnonymousUser
+    void anonymousRotationIsRejectedBeforeCallingService() throws Exception {
+        mvc.perform(post(ROUTE, ID).with(csrf()).accept(MediaType.APPLICATION_JSON))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void rotationWithoutCsrfIsRejectedBeforeCallingService() throws Exception {
+        mvc.perform(post(ROUTE, ID)).andExpect(status().isForbidden());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void rotationWithInvalidCsrfIsRejectedBeforeCallingService() throws Exception {
+        mvc.perform(post(ROUTE, ID).with(csrf().useInvalidToken())).andExpect(status().isForbidden());
+        verifyNoInteractions(service);
+    }
 
     private static final UUID ID = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
     private static final String NEW_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -53,7 +80,7 @@ class WebhookSecretRotationControllerTests {
         when(endpoint.getPreviousSigningSecretExpiresAt()).thenReturn(EXPIRY);
         when(service.rotate(ID)).thenReturn(Optional.of(endpoint));
 
-        mvc.perform(post(ROUTE, ID))
+        mvc.perform(post(ROUTE, ID).with(csrf()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.id").value(ID.toString()))
@@ -70,7 +97,7 @@ class WebhookSecretRotationControllerTests {
     void missingEndpointReturnsEmptyNotFoundResponse() throws Exception {
         when(service.rotate(ID)).thenReturn(Optional.empty());
 
-        mvc.perform(post(ROUTE, ID))
+        mvc.perform(post(ROUTE, ID).with(csrf()))
                 .andExpect(status().isNotFound())
                 .andExpect(content().string(""));
 
@@ -81,7 +108,7 @@ class WebhookSecretRotationControllerTests {
     void activeOverlapReturnsConflictProblemDetail() throws Exception {
         when(service.rotate(ID)).thenThrow(new SecretRotationInProgressException());
 
-        mvc.perform(post(ROUTE, ID))
+        mvc.perform(post(ROUTE, ID).with(csrf()))
                 .andExpect(status().isConflict())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$.status").value(409))
@@ -98,7 +125,7 @@ class WebhookSecretRotationControllerTests {
     @ParameterizedTest
     @ValueSource(strings = {"not-a-uuid", "123", "a8a1d32a-a014-47bb-bf82-f31ea55e4acg"})
     void malformedIdReturnsBadRequestWithoutCallingService(String id) throws Exception {
-        mvc.perform(post(ROUTE, id)).andExpect(status().isBadRequest());
+        mvc.perform(post(ROUTE, id).with(csrf())).andExpect(status().isBadRequest());
 
         verifyNoInteractions(service);
     }
