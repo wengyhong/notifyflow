@@ -4,11 +4,16 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
+import com.wenghong.notifyflow.identity.domain.Tenant;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
@@ -20,7 +25,17 @@ public class WebhookEndpoint {
 
     }
 
-    public WebhookEndpoint(String name, String url, Instant now, String signingSecret) {
+    public WebhookEndpoint(
+            Tenant tenant,
+            String name,
+            String url,
+            Instant now,
+            String signingSecret) {
+        this(name, url, now, signingSecret);
+        this.tenant = Objects.requireNonNull(tenant);
+    }
+
+    private WebhookEndpoint(String name, String url, Instant now, String signingSecret) {
 
         this.name = name;
         this.url = url;
@@ -33,6 +48,10 @@ public class WebhookEndpoint {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "tenant_id", nullable = false)
+    private Tenant tenant;
 
     @Column(name = "name", length = 100, nullable = false)
     private String name;
@@ -59,10 +78,15 @@ public class WebhookEndpoint {
     private Instant previousSigningSecretExpiresAt;
 
     @Version
-    @Column (nullable = false)
+    @Column(nullable = false)
     private long version;
+
     public UUID getId() {
         return id;
+    }
+
+    public Tenant getTenant() {
+        return tenant;
     }
 
     public String getName() {

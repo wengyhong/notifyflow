@@ -10,6 +10,8 @@ import org.springframework.transaction.annotation.Transactional;
 import com.wenghong.notifyflow.endpoint.domain.WebhookSubscription;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookSubscriptionRepository;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+
 import org.hibernate.exception.ConstraintViolationException;
 
 @Service
@@ -25,9 +27,11 @@ public class WebhookSubscriptionService {
     }
 
     @Transactional
-    public Optional<WebhookSubscription> create(UUID id, String eventType) {
+    public Optional<WebhookSubscription> create(TenantAccess access, UUID id, String eventType) {
 
-        return endpoints.findById(id).map(endpoint -> {
+        access.requireAdmin();
+
+        return endpoints.findByIdAndTenant_Id(id, access.tenantId()).map(endpoint -> {
 
             WebhookSubscription subscription = new WebhookSubscription(endpoint, eventType);
 

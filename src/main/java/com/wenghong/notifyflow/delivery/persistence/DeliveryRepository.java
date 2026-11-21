@@ -18,18 +18,29 @@ import jakarta.persistence.LockModeType;
 
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select d from Delivery d where d.id = :id")
-    Optional<Delivery> findByIdForUpdate(@Param("id") UUID id);
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("select d from Delivery d where d.id = :id")
+        Optional<Delivery> findByIdForUpdate(@Param("id") UUID id);
 
-    @Query("""
-            select d.id
-            from Delivery d
-            where d.status = :status
-            and d.nextAttemptAt  <= :now
-            order by d.nextAttemptAt , d.id
-            """)
-    List<UUID> findDueRetryIds(@Param("status") DeliveryStatus status,
-            @Param("now") Instant now,
-            Pageable pageable);
+        @Query("""
+                        select d.id
+                        from Delivery d
+                        where d.status = :status
+                        and d.nextAttemptAt  <= :now
+                        order by d.nextAttemptAt , d.id
+                        """)
+        List<UUID> findDueRetryIds(@Param("status") DeliveryStatus status,
+                        @Param("now") Instant now,
+                        Pageable pageable);
+
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("""
+                        select d from Delivery d
+                        where d.id = :id
+                          and d.event.tenant.id = :tenantId
+                          and d.endpoint.tenant.id = :tenantId
+                        """)
+        Optional<Delivery> findByIdAndTenantIdForUpdate(
+                        @Param("id") UUID id,
+                        @Param("tenantId") UUID tenantId);
 }

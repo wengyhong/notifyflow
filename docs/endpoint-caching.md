@@ -13,8 +13,8 @@ The separate cache for accepted event requests is described in
 
 ## Cached data and expiry
 
-`WebhookEndpointSnapshot` is an immutable record containing `id`, `name`, `url`,
-`enabled`, `createdAt`, and `updatedAt`. Its `from()` factory copies these fields
+`WebhookEndpointSnapshot` is an immutable record containing `id`, `tenantId`,
+`name`, `url`, `enabled`, `createdAt`, and `updatedAt`. Its `from()` factory copies these fields
 from the JPA entity. `RedisWebhookEndpointCache` serializes this snapshot as JSON
 using `JsonMapper` and stores it through `StringRedisTemplate`.
 
@@ -36,17 +36,25 @@ snapshots rather than serialized JPA entities.
 GET /api/endpoints/{id}
     -> WebhookEndpointController
     -> WebhookEndpointQueryService.findById
-         cache hit  -> return cached snapshot
-         cache miss -> load endpoint from PostgreSQL
+         matching cached tenant -> return cached snapshot
+         cache miss or wrong/missing cached tenant -> load endpoint by ID and tenant
                        -> convert to WebhookEndpointSnapshot
                        -> attempt to cache it for 60 seconds
                        -> return snapshot
-         absent in PostgreSQL -> return empty -> HTTP 404
+         absent in selected tenant -> return empty -> HTTP 404
 ```
 
 The controller maps the snapshot to `WebhookEndpointResponse`, preserving the
 existing HTTP response fields. A hit skips the repository lookup and does not
 rewrite the cache.
+
+The controller verifies membership using the session user and `X-Tenant-ID`
+before accessing the cache. Both admins and viewers can read their own tenant's
+endpoints. A nonmember receives 403 before a cache read. The snapshot's internal
+`tenantId` is used to check ownership and is not added to the public response.
+The Redis key remains endpoint-ID-based because endpoint UUIDs are unique across
+tenants; a cached owner mismatch is treated as a miss and falls back to a scoped
+database lookup. See [authentication](authentication.md#tenant-ownership-and-authorization).
 
 ## Invalidation after commit
 
@@ -108,6 +116,11 @@ to cached public detail reads; delivery processing does not obtain its secrets
 or endpoint state from this snapshot cache.
 
 ## Manual verification
+
+This walkthrough records the original Milestone 7 check. Current detail reads
+also need the authenticated session and `X-Tenant-ID`; writes additionally need
+CSRF and administrator access. Follow [authentication](authentication.md#local-verification-with-powershell)
+to prepare those values before adapting the historical commands below.
 
 Keep PostgreSQL, RabbitMQ, Redis, and NotifyFlow running. Replace these demo
 values with the actual application port and an existing endpoint ID:

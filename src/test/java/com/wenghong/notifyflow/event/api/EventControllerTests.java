@@ -3,6 +3,14 @@ package com.wenghong.notifyflow.event.api;
 import java.time.Instant;
 import java.util.UUID;
 
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
+import com.wenghong.notifyflow.identity.application.TenantAccessService;
+import com.wenghong.notifyflow.identity.domain.AppUser;
+import com.wenghong.notifyflow.identity.security.AppUserDetails;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import com.wenghong.notifyflow.event.application.EventIngestionService;
 import com.wenghong.notifyflow.event.application.IdempotencyConflictException;
 import com.wenghong.notifyflow.event.application.EventSnapshot;
@@ -21,6 +29,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.anonymous;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -38,7 +48,7 @@ class EventControllerTests {
     @Test
     @WithAnonymousUser
     void anonymousIngestionIsRejectedBeforeCallingService() throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(anonymous()).with(csrf())
                         .accept(MediaType.APPLICATION_JSON)
                         .header("Idempotency-Key", "test-key")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -49,7 +59,7 @@ class EventControllerTests {
 
     @Test
     void ingestionWithoutCsrfIsRejectedBeforeCallingService() throws Exception {
-        mockMvc.perform(post("/api/events")
+        mockMvc.perform(eventRequest()
                         .header("Idempotency-Key", "test-key")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"order.confirmed\",\"payload\":{}}"))
@@ -59,12 +69,28 @@ class EventControllerTests {
 
     @Test
     void ingestionWithInvalidCsrfIsRejectedBeforeCallingService() throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf().useInvalidToken())
+        mockMvc.perform(eventRequest().with(csrf().useInvalidToken())
                         .header("Idempotency-Key", "test-key")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"order.confirmed\",\"payload\":{}}"))
                 .andExpect(status().isForbidden());
         verifyNoInteractions(service);
+    }
+
+    private static final UUID USER_ID = UUID.randomUUID();
+    private static final UUID TENANT_ID = UUID.randomUUID();
+    private static final TenantAccess ACCESS = new TenantAccess(TENANT_ID, TenantRole.ADMIN);
+    @MockitoBean private TenantAccessService tenantAccess;
+
+    @BeforeEach
+    void verifiedMembership() {
+        when(tenantAccess.requireAccess(TENANT_ID, USER_ID)).thenReturn(ACCESS);
+    }
+
+    private MockHttpServletRequestBuilder eventRequest() {
+        AppUser account = new AppUser("admin@example.com", "unused-test-hash", Instant.parse("2026-11-20T00:00:00Z"));
+        ReflectionTestUtils.setField(account, "id", USER_ID);
+        return post("/api/events").with(user(new AppUserDetails(account))).header("X-Tenant-ID", TENANT_ID);
     }
 
     @Autowired
@@ -81,9 +107,9 @@ class EventControllerTests {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
         Instant createdAt = Instant.parse("2026-10-30T00:00:00Z");
         EventSnapshot accepted = new EventSnapshot(id, type, payload, createdAt);
-        when(service.ingest(type, payload, key)).thenReturn(accepted);
+        when(service.ingest(ACCESS, type, payload, key)).thenReturn(accepted);
 
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"%s\",\"payload\":{}}".formatted(type)))
@@ -93,12 +119,12 @@ class EventControllerTests {
                 .andExpect(jsonPath("$.type").value(type))
                 .andExpect(jsonPath("$.createdAt").value(createdAt.toString()));
 
-        verify(service).ingest(type, payload, key);
+        verify(service).ingest(ACCESS, type, payload, key);
     }
 
     @Test
     void ingestRejectsEventTypeLongerThan100Characters() throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", "order-128-confirmed")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"%s\",\"payload\":{}}".formatted("t".repeat(101))))
@@ -110,7 +136,7 @@ class EventControllerTests {
     @ParameterizedTest
     @ValueSource(strings = {"{", "", "null"})
     void ingestRejectsMalformedOrMissingBody(String requestBody) throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", "order-128-confirmed")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
@@ -121,7 +147,7 @@ class EventControllerTests {
 
     @Test
     void ingestRejectsUnsupportedContentType() throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", "order-128-confirmed")
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("order.confirmed"))
@@ -134,10 +160,10 @@ class EventControllerTests {
     void ingestReturnsConflictForReusedKeyWithDifferentData() throws Exception {
         String key = "order-128-confirmed";
         JsonNode payload = JsonMapper.builder().build().readTree("{\"orderNumber\":\"999\"}");
-        when(service.ingest("order.confirmed", payload, key))
+        when(service.ingest(ACCESS, "order.confirmed", payload, key))
                 .thenThrow(new IdempotencyConflictException());
 
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -153,7 +179,7 @@ class EventControllerTests {
                 .andExpect(jsonPath("$.detail")
                         .value("The idempotency key has already been used for a different event."));
 
-        verify(service).ingest("order.confirmed", payload, key);
+        verify(service).ingest(ACCESS, "order.confirmed", payload, key);
     }
 
     @ParameterizedTest
@@ -164,7 +190,7 @@ class EventControllerTests {
             "{\"type\":\"order.confirmed\"}"
     })
     void ingestRejectsMissingOrBlankRequiredBodyFields(String requestBody) throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", "order-128-confirmed")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
@@ -176,7 +202,7 @@ class EventControllerTests {
     @ParameterizedTest
     @ValueSource(strings = {"", "   "})
     void ingestRejectsBlankIdempotencyKey(String key) throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -192,7 +218,7 @@ class EventControllerTests {
 
     @Test
     void ingestRejectsIdempotencyKeyLongerThan200Characters() throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", "x".repeat(201))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -208,7 +234,7 @@ class EventControllerTests {
 
     @Test
     void ingestRejectsMissingIdempotencyKey() throws Exception {
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -230,9 +256,9 @@ class EventControllerTests {
                 {"orderNumber":"128","items":[{"sku":"A","quantity":2}]}
                 """);
         EventSnapshot accepted = new EventSnapshot(id, "order.confirmed", payload, createdAt);
-        when(service.ingest("order.confirmed", payload, key)).thenReturn(accepted);
+        when(service.ingest(ACCESS, "order.confirmed", payload, key)).thenReturn(accepted);
 
-        mockMvc.perform(post("/api/events").with(csrf())
+        mockMvc.perform(eventRequest().with(csrf())
                         .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -251,6 +277,6 @@ class EventControllerTests {
                 .andExpect(jsonPath("$.createdAt").value(createdAt.toString()))
                 .andExpect(jsonPath("$.payload").doesNotExist());
 
-        verify(service).ingest("order.confirmed", payload, key);
+        verify(service).ingest(ACCESS, "order.confirmed", payload, key);
     }
 }

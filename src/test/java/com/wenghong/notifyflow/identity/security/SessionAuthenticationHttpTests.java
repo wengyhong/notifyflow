@@ -8,8 +8,12 @@ import com.wenghong.notifyflow.endpoint.api.WebhookEndpointController;
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointQueryService;
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointService;
 import com.wenghong.notifyflow.identity.api.CsrfController;
+import com.wenghong.notifyflow.identity.application.TenantAccessService;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
 import com.wenghong.notifyflow.identity.configuration.PasswordConfiguration;
 import com.wenghong.notifyflow.identity.configuration.SecurityConfiguration;
+import com.wenghong.notifyflow.identity.configuration.ProducerSecurityConfiguration;
 import com.wenghong.notifyflow.identity.domain.AppUser;
 import com.wenghong.notifyflow.identity.persistence.AppUserRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,10 +59,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest({WebhookEndpointController.class, CsrfController.class})
-@Import({SecurityConfiguration.class, DatabaseUserDetailsService.class, PasswordConfiguration.class})
+@Import({SecurityConfiguration.class, ProducerSecurityConfiguration.class,
+        DatabaseUserDetailsService.class, PasswordConfiguration.class})
 class SessionAuthenticationHttpTests {
 
     private static final UUID USER_ID = UUID.randomUUID();
+    private static final UUID TENANT_ID = UUID.randomUUID();
+    private static final TenantAccess ACCESS = new TenantAccess(TENANT_ID, TenantRole.ADMIN);
     private static final UUID ENDPOINT_ID = UUID.randomUUID();
     private static final String PASSWORD = "NotifyFlow-test-password-128";
     private static final String LOGIN = "/api/auth/login";
@@ -70,6 +77,8 @@ class SessionAuthenticationHttpTests {
     @MockitoBean private AppUserRepository users;
     @MockitoBean private WebhookEndpointService endpoints;
     @MockitoBean private WebhookEndpointQueryService queries;
+    @MockitoBean private TenantAccessService tenantAccess;
+    @MockitoBean private ApiKeyAuthenticationService apiKeyAuthentication;
     private AppUser user;
 
     @BeforeEach
@@ -77,6 +86,7 @@ class SessionAuthenticationHttpTests {
         user = new AppUser("Alice@example.com", encoder.encode(PASSWORD), Instant.parse("2026-11-20T00:00:00Z"));
         ReflectionTestUtils.setField(user, "id", USER_ID);
         when(users.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(tenantAccess.requireAccess(TENANT_ID, USER_ID)).thenReturn(ACCESS);
     }
 
     @Test
@@ -93,7 +103,7 @@ class SessionAuthenticationHttpTests {
     @ParameterizedTest
     @ValueSource(strings = {"application/json", "text/html"})
     void anonymousProtectedRequestReturns401WithoutRedirectOrSavedSession(String accept) throws Exception {
-        var result = mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).accept(MediaType.parseMediaType(accept)))
+        var result = mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).header("X-Tenant-ID", TENANT_ID).accept(MediaType.parseMediaType(accept)))
                 .andExpect(status().isUnauthorized()).andExpect(header().doesNotExist("Location"))
                 .andReturn();
 
@@ -103,7 +113,7 @@ class SessionAuthenticationHttpTests {
 
     @Test
     void validHttpBasicCredentialsDoNotAuthenticate() throws Exception {
-        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID)
+        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).header("X-Tenant-ID", TENANT_ID)
                         .with(httpBasic("alice@example.com", PASSWORD)).accept(MediaType.APPLICATION_JSON))
                 .andExpect(status().isUnauthorized())
                 .andExpect(header().doesNotExist("WWW-Authenticate"));
@@ -133,11 +143,11 @@ class SessionAuthenticationHttpTests {
         assertNull(principal.getPassword());
         assertNull(context.getAuthentication().getCredentials());
 
-        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).session(session))
+        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).header("X-Tenant-ID", TENANT_ID).session(session))
                 .andExpect(status().isNotFound());
 
         verify(users).findByEmail(email);
-        verify(queries).findById(ENDPOINT_ID);
+        verify(queries).findById(ACCESS, ENDPOINT_ID);
         verifyNoInteractions(endpoints);
     }
 
@@ -229,19 +239,19 @@ class SessionAuthenticationHttpTests {
         Token beforeLogin = fetchToken(null);
         MockHttpSession session = login(beforeLogin);
 
-        mvc.perform(patch("/api/endpoints/{id}/enabled", ENDPOINT_ID).session(session)
+        mvc.perform(patch("/api/endpoints/{id}/enabled", ENDPOINT_ID).header("X-Tenant-ID", TENANT_ID).session(session)
                         .header(beforeLogin.headerName(), beforeLogin.value())
                         .contentType(MediaType.APPLICATION_JSON).content("{\"enabled\":false}"))
                 .andExpect(status().isForbidden());
         verifyNoInteractions(endpoints);
 
         Token afterLogin = fetchToken(session);
-        mvc.perform(patch("/api/endpoints/{id}/enabled", ENDPOINT_ID).session(session)
+        mvc.perform(patch("/api/endpoints/{id}/enabled", ENDPOINT_ID).header("X-Tenant-ID", TENANT_ID).session(session)
                         .header(afterLogin.headerName(), afterLogin.value())
                         .contentType(MediaType.APPLICATION_JSON).content("{\"enabled\":false}"))
                 .andExpect(status().isNotFound());
 
-        verify(endpoints).changeEnabled(ENDPOINT_ID, false);
+        verify(endpoints).changeEnabled(ACCESS, ENDPOINT_ID, false);
     }
 
     @Test
@@ -255,7 +265,7 @@ class SessionAuthenticationHttpTests {
                 .andExpect(cookie().maxAge("JSESSIONID", 0));
 
         assertTrue(session.isInvalid());
-        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).accept(MediaType.APPLICATION_JSON))
+        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).header("X-Tenant-ID", TENANT_ID).accept(MediaType.APPLICATION_JSON))
                 .andExpect(status().isUnauthorized());
         Token afterLogout = fetchToken(null);
         assertNull(afterLogout.session().getAttribute(SPRING_SECURITY_CONTEXT_KEY));
@@ -276,9 +286,9 @@ class SessionAuthenticationHttpTests {
 
         assertFalse(session.isInvalid());
         assertTrue(context(session).getAuthentication().isAuthenticated());
-        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).session(session))
+        mvc.perform(get("/api/endpoints/{id}", ENDPOINT_ID).header("X-Tenant-ID", TENANT_ID).session(session))
                 .andExpect(status().isNotFound());
-        verify(queries).findById(ENDPOINT_ID);
+        verify(queries).findById(ACCESS, ENDPOINT_ID);
     }
 
     @Test

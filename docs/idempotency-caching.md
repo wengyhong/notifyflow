@@ -2,19 +2,22 @@
 
 NotifyFlow caches accepted event snapshots in Redis so repeat ingestion requests
 can be checked without querying PostgreSQL. PostgreSQL retains the durable
-idempotency key and enforces its uniqueness. Cache expiry, deletion, or an outage
-does not make an existing key available for another event.
+idempotency key and enforces uniqueness within its tenant. Cache expiry, deletion,
+or an outage does not make an existing key available for another event in that tenant.
 
 ## Request rules
 
-`POST /api/events` requires an `Idempotency-Key` header. Both cached and database
-lookups apply the same comparison:
+Both `POST /api/events` (admin session) and `POST /api/producer/events` (producer
+key) require an `Idempotency-Key` header. Authentication determines the permitted
+tenant before ingestion. Both cached and database lookups apply the following
+comparison within that tenant:
 
 | Request | Result |
 | --- | --- |
 | Same key, same event type and JSON payload | Return the original event ID, type, and creation time with HTTP 202 |
 | Same key, different type or payload | HTTP 409 via `IdempotencyConflictException` |
 | Different key, same content | A separate event can be created |
+| Different tenant, same key | An independent event can be created |
 
 Payloads are compared as `JsonNode` trees, not raw JSON strings. Object property
 ordering and whitespace differences do not by themselves cause a conflict.
@@ -33,14 +36,14 @@ in `EventAcceptedResponse`, whose HTTP fields remain `id`, `type`, and `createdA
 
 | Setting | Current behavior |
 | --- | --- |
-| Key | `notifyflow:event:idempotency:<idempotency-key>` |
+| Key | `notifyflow:event:idempotency:<tenant-id>:<idempotency-key>` |
 | Value | Event snapshot serialized as JSON |
 | TTL | 24 hours, currently hardcoded in `put()` |
 | Cache hit | Does not rewrite the entry or extend its TTL |
 | Successful database path | Requests a cache write with a fresh TTL |
 | Missing keys or failed ingestion | Not cached as successful events |
 
-`EventIdempotencyCache` defines the lookup and write operations.
+`EventIdempotencyCache` requires a tenant ID for both lookup and write operations.
 `RedisEventIdempotencyCache` implements them with `StringRedisTemplate` and
 `JsonMapper`. Configuration is shared with the other Redis features; see
 [Redis delivery rate limiting](redis-rate-limiting.md#local-configuration).
@@ -48,12 +51,12 @@ in `EventAcceptedResponse`, whose HTTP fields remain `id`, `type`, and `createdA
 ## Ingestion flow
 
 ```text
-POST /api/events + Idempotency-Key
-    -> EventIngestionService.ingest
+Authenticated session or producer event request + Idempotency-Key
+    -> tenant-specific shared ingestion logic
          Redis hit -> compare cached type and payload
                       -> match: return original EventSnapshot
                       -> mismatch: HTTP 409
-         Redis miss/unavailable -> find event in PostgreSQL by key
+         Redis miss/unavailable -> find event in PostgreSQL by tenant and key
               existing -> compare type and payload
                           -> match: reuse event
                           -> mismatch: HTTP 409
@@ -70,7 +73,7 @@ validating the content. Initial creation and reuse therefore produce the same
 acceptance response shape.
 
 Two requests can both miss Redis and PostgreSQL before either inserts.
-The `uq_events_idempotency_key` database constraint resolves this race. In the
+The `uq_events_tenant_idempotency_key` database constraint resolves this race. In the
 normal ingestion path, the losing creation transaction rolls back, and recovery
 loads the winning event and applies the same content comparison. Unrelated
 integrity violations are rethrown. Redis is not a distributed lock or the
@@ -79,7 +82,7 @@ authority deciding whether duplicate insertion is allowed.
 ## Commit-safe cache writes
 
 After a successful database path, ingestion publishes an internal
-`EventIdempotencyCacheRequestedEvent(idempotencyKey, snapshot)`.
+`EventIdempotencyCacheRequestedEvent(tenantId, idempotencyKey, snapshot)`.
 `EventIdempotencyCacheRequestedEventListener` handles it with:
 
 ```java
@@ -119,14 +122,21 @@ The application currently treats accepted events as unchanged data. There is no
 cache eviction operation for editing or deleting events. The 24-hour cache TTL
 does not define database retention or the lifetime of the idempotency guarantee;
 that guarantee depends on retaining the PostgreSQL row and its unique key.
-The cache stores the full payload and uses globally scoped keys under the current
-application model. Tenant scoping and event retention would need corresponding
-cache design changes when introduced.
+The cache stores the full payload under tenant-scoped keys. Old unscoped entries
+are not read by the tenant-aware lookup and expire naturally. Event retention
+still needs to account for the lifetime of the database idempotency guarantee.
 
 This cache avoids duplicate event creation for a reused key. It does not add
 exactly-once HTTP delivery or deduplicate separate requests using different keys.
 
 ## Manual verification
+
+The walkthrough below records the original pre-authentication Milestone 7 check.
+For current requests, follow [authentication and producer verification](authentication.md#local-verification-with-powershell).
+Session calls to `/api/events` additionally need the session, CSRF token, and
+`X-Tenant-ID`. Producer calls use `/api/producer/events` with a Bearer key. Inspect
+Redis using `notifyflow:event:idempotency:<tenant-id>:<idempotency-key>`; the old
+unscoped inspection commands below apply only to that historical checkpoint.
 
 Run PostgreSQL, RabbitMQ, Redis, and NotifyFlow. In another PowerShell terminal,
 replace the application port if necessary, then create a fresh demo key:

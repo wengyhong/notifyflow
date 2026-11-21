@@ -6,6 +6,15 @@ import java.util.stream.Stream;
 
 import com.wenghong.notifyflow.endpoint.application.WebhookSubscriptionService;
 import com.wenghong.notifyflow.endpoint.application.DuplicateWebhookSubscriptionException;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
+import java.time.Instant;
+import com.wenghong.notifyflow.identity.application.TenantAccessService;
+import com.wenghong.notifyflow.identity.domain.AppUser;
+import com.wenghong.notifyflow.identity.security.AppUserDetails;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.domain.WebhookSubscription;
 import org.junit.jupiter.api.Test;
@@ -23,6 +32,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.mockito.Mockito.mock;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.anonymous;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -40,7 +51,7 @@ class WebhookSubscriptionControllerTests {
     @Test
     @WithAnonymousUser
     void anonymousSubscriptionIsRejectedBeforeCallingService() throws Exception {
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(anonymous()).with(csrf())
                         .accept(MediaType.APPLICATION_JSON)
                         .contentType(MediaType.APPLICATION_JSON).content("{\"eventType\":\"order.confirmed\"}"))
                 .andExpect(status().isUnauthorized());
@@ -49,7 +60,7 @@ class WebhookSubscriptionControllerTests {
 
     @Test
     void subscriptionWithoutCsrfIsRejectedBeforeCallingService() throws Exception {
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID)
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID)
                         .contentType(MediaType.APPLICATION_JSON).content("{\"eventType\":\"order.confirmed\"}"))
                 .andExpect(status().isForbidden());
         verifyNoInteractions(service);
@@ -57,7 +68,7 @@ class WebhookSubscriptionControllerTests {
 
     @Test
     void subscriptionWithInvalidCsrfIsRejectedBeforeCallingService() throws Exception {
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf().useInvalidToken())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf().useInvalidToken())
                         .contentType(MediaType.APPLICATION_JSON).content("{\"eventType\":\"order.confirmed\"}"))
                 .andExpect(status().isForbidden());
         verifyNoInteractions(service);
@@ -68,6 +79,23 @@ class WebhookSubscriptionControllerTests {
     private static final UUID SUBSCRIPTION_ID =
             UUID.fromString("e292322e-31ce-4892-bf9d-33e3eba2c5d7");
 
+    private static final UUID TENANT_ID = UUID.randomUUID();
+    private static final UUID USER_ID = UUID.randomUUID();
+    private static final TenantAccess ACCESS = new TenantAccess(TENANT_ID, TenantRole.ADMIN);
+    @MockitoBean private TenantAccessService tenantAccess;
+
+    @BeforeEach
+    void verifiedMembership() {
+        when(tenantAccess.requireAccess(TENANT_ID, USER_ID)).thenReturn(ACCESS);
+    }
+
+    private MockHttpServletRequestBuilder subscriptionRequest(Object id) {
+        AppUser account = new AppUser("admin@example.com", "unused-test-hash", Instant.parse("2026-11-20T00:00:00Z"));
+        ReflectionTestUtils.setField(account, "id", USER_ID);
+        return post("/api/subscriptions/{id}", id).with(user(new AppUserDetails(account)))
+                .header("X-Tenant-ID", TENANT_ID);
+    }
+
     @Autowired
     private MockMvc mockMvc;
 
@@ -77,10 +105,10 @@ class WebhookSubscriptionControllerTests {
     @Test
     void createReturnsConflictWhenSubscriptionAlreadyExists() throws Exception {
         RuntimeException databaseCause = new RuntimeException("Internal database diagnostic");
-        when(service.create(ENDPOINT_ID, "order.confirmed"))
+        when(service.create(ACCESS, ENDPOINT_ID, "order.confirmed"))
                 .thenThrow(new DuplicateWebhookSubscriptionException(databaseCause));
 
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"eventType\":\"order.confirmed\"}"))
                 .andExpect(status().isConflict())
@@ -92,7 +120,7 @@ class WebhookSubscriptionControllerTests {
                 .andExpect(jsonPath("$.cause").doesNotExist())
                 .andExpect(jsonPath("$.stackTrace").doesNotExist());
 
-        verify(service).create(ENDPOINT_ID, "order.confirmed");
+        verify(service).create(ACCESS, ENDPOINT_ID, "order.confirmed");
     }
 
     @ParameterizedTest
@@ -104,9 +132,9 @@ class WebhookSubscriptionControllerTests {
         when(subscription.getId()).thenReturn(SUBSCRIPTION_ID);
         when(subscription.getEndpoint()).thenReturn(endpoint);
         when(subscription.getEventType()).thenReturn(eventType);
-        when(service.create(ENDPOINT_ID, eventType)).thenReturn(Optional.of(subscription));
+        when(service.create(ACCESS, ENDPOINT_ID, eventType)).thenReturn(Optional.of(subscription));
 
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"eventType\":\"%s\"}".formatted(eventType)))
                 .andExpect(status().isCreated())
@@ -115,7 +143,7 @@ class WebhookSubscriptionControllerTests {
                 .andExpect(jsonPath("$.endpointId").value(ENDPOINT_ID.toString()))
                 .andExpect(jsonPath("$.eventType").value(eventType));
 
-        verify(service).create(ENDPOINT_ID, eventType);
+        verify(service).create(ACCESS, ENDPOINT_ID, eventType);
     }
 
     private static Stream<String> validEventTypes() {
@@ -124,15 +152,15 @@ class WebhookSubscriptionControllerTests {
 
     @Test
     void createReturnsNotFoundWhenEndpointIsMissing() throws Exception {
-        when(service.create(ENDPOINT_ID, "order.confirmed")).thenReturn(Optional.empty());
+        when(service.create(ACCESS, ENDPOINT_ID, "order.confirmed")).thenReturn(Optional.empty());
 
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"eventType\":\"order.confirmed\"}"))
                 .andExpect(status().isNotFound())
                 .andExpect(content().string(""));
 
-        verify(service).create(ENDPOINT_ID, "order.confirmed");
+        verify(service).create(ACCESS, ENDPOINT_ID, "order.confirmed");
     }
 
     @ParameterizedTest
@@ -143,7 +171,7 @@ class WebhookSubscriptionControllerTests {
             "{\"eventType\":\"   \"}"
     })
     void createRejectsMissingNullOrBlankEventType(String requestBody) throws Exception {
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
                 .andExpect(status().isBadRequest());
@@ -155,7 +183,7 @@ class WebhookSubscriptionControllerTests {
     void createRejectsEventTypeLongerThan100Characters() throws Exception {
         String eventType = "x".repeat(101);
 
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"eventType\":\"%s\"}".formatted(eventType)))
                 .andExpect(status().isBadRequest());
@@ -166,7 +194,7 @@ class WebhookSubscriptionControllerTests {
     @ParameterizedTest
     @ValueSource(strings = {"{", "", "null", "{\"eventType\":{}}"})
     void createRejectsMalformedOrMissingBody(String requestBody) throws Exception {
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
                 .andExpect(status().isBadRequest());
@@ -176,7 +204,7 @@ class WebhookSubscriptionControllerTests {
 
     @Test
     void createRejectsMalformedEndpointId() throws Exception {
-        mockMvc.perform(post("/api/subscriptions/{id}", "not-a-uuid").with(csrf())
+        mockMvc.perform(subscriptionRequest("not-a-uuid").with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"eventType\":\"order.confirmed\"}"))
                 .andExpect(status().isBadRequest());
@@ -186,7 +214,7 @@ class WebhookSubscriptionControllerTests {
 
     @Test
     void createRejectsUnsupportedContentType() throws Exception {
-        mockMvc.perform(post("/api/subscriptions/{id}", ENDPOINT_ID).with(csrf())
+        mockMvc.perform(subscriptionRequest(ENDPOINT_ID).with(csrf())
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("order.confirmed"))
                 .andExpect(status().isUnsupportedMediaType());

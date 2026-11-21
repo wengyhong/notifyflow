@@ -26,6 +26,10 @@ import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.persistence.PostgresTestConfiguration;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 import com.wenghong.notifyflow.event.domain.Event;
 import com.wenghong.notifyflow.event.persistence.EventRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -91,8 +95,15 @@ class DeliveryReplayServiceIntegrationTests {
     @MockitoBean private Clock clock;
     @MockitoBean private DeliveryRateLimiter rateLimiter;
 
+    @Autowired private TenantRepository tenants;
+    @Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
+    private Tenant tenant;
+    private TenantAccess access;
+
     @BeforeEach
     void fixCurrentTime() {
+        tenant = tenants.saveAndFlush(new Tenant("Company A", NOW));
+        access = new TenantAccess(tenant.getId(), TenantRole.ADMIN);
         when(clock.instant()).thenReturn(NOW);
         when(rateLimiter.tryAcquire(any(UUID.class)))
                 .thenReturn(new DeliveryRateLimitDecision(true, Duration.ZERO));
@@ -106,11 +117,12 @@ class DeliveryReplayServiceIntegrationTests {
         deliveries.deleteAllInBatch();
         events.deleteAllInBatch();
         endpoints.deleteAllInBatch();
+        tenants.deleteAllInBatch();
     }
 
     @Test
     void missingDeliveryReturnsEmptyWithoutPublishing() {
-        assertTrue(service.replay(UUID.randomUUID()).isEmpty());
+        assertTrue(service.replay(access, UUID.randomUUID()).isEmpty());
 
         verifyNoInteractions(publisher, sender);
         assertEquals(0L, deliveries.count());
@@ -119,12 +131,49 @@ class DeliveryReplayServiceIntegrationTests {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"FOREIGN_BOTH", "FOREIGN_EVENT", "FOREIGN_ENDPOINT"})
+    void inaccessibleDeliveryCannotReplayOrCreateOutboxWork(String ownership) {
+        Delivery original = saveFailedDelivery(1);
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", NOW));
+        if (ownership.equals("FOREIGN_BOTH") || ownership.endsWith("EVENT")) {
+            jdbc.update("UPDATE events SET tenant_id = ? WHERE id = ?",
+                    other.getId(), original.getEvent().getId());
+        }
+        if (ownership.equals("FOREIGN_BOTH") || ownership.endsWith("ENDPOINT")) {
+            jdbc.update("UPDATE webhook_endpoints SET tenant_id = ? WHERE id = ?",
+                    other.getId(), original.getEndpoint().getId());
+        }
+        List<UUID> history = attempts.findAll().stream().map(DeliveryAttempt::getId).toList();
+
+        assertTrue(service.replay(access, original.getId()).isEmpty());
+
+        Delivery unchanged = deliveries.findById(original.getId()).orElseThrow();
+        assertEquals(DeliveryStatus.FAILED, unchanged.getStatus());
+        assertEquals(original.getRetryCycleStartAttempt(), unchanged.getRetryCycleStartAttempt());
+        assertEquals(original.getNextAttemptAt(), unchanged.getNextAttemptAt());
+        assertEquals(history, attempts.findAll().stream().map(DeliveryAttempt::getId).toList());
+        assertEquals(0L, outbox.count());
+        verifyNoInteractions(publisher, sender);
+    }
+
+    @Test
+    void viewerCannotReplayOwnedDeliveryOrCreateOutboxWork() {
+        Delivery original = saveFailedDelivery(1);
+        assertThrows(org.springframework.security.access.AccessDeniedException.class,
+                () -> service.replay(new TenantAccess(tenant.getId(), TenantRole.VIEWER), original.getId()));
+        assertEquals(DeliveryStatus.FAILED, deliveries.findById(original.getId()).orElseThrow().getStatus());
+        assertEquals(1L, attempts.count());
+        assertEquals(0L, outbox.count());
+        verifyNoInteractions(publisher, sender);
+    }
+
+    @ParameterizedTest
     @ValueSource(ints = {1, 5})
     void replayPreservesDeliveryAndHistoryAndCreatesOneOutboxRequest(int previousAttempts) {
         Delivery original = saveFailedDelivery(previousAttempts);
         List<UUID> originalAttemptIds = attempts.findAll().stream().map(DeliveryAttempt::getId).toList();
 
-        Delivery replayed = service.replay(original.getId()).orElseThrow();
+        Delivery replayed = service.replay(access, original.getId()).orElseThrow();
 
         assertEquals(original.getId(), replayed.getId());
         assertEquals(DeliveryStatus.PENDING, replayed.getStatus());
@@ -153,7 +202,7 @@ class DeliveryReplayServiceIntegrationTests {
     void nonFailedDeliveryCannotBeReplayed(DeliveryStatus status) {
         Delivery delivery = saveDelivery(status);
 
-        assertThrows(DeliveryReplayNotAllowedException.class, () -> service.replay(delivery.getId()));
+        assertThrows(DeliveryReplayNotAllowedException.class, () -> service.replay(access, delivery.getId()));
 
         Delivery persisted = deliveries.findById(delivery.getId()).orElseThrow();
         assertEquals(status, persisted.getStatus());
@@ -169,7 +218,7 @@ class DeliveryReplayServiceIntegrationTests {
     void failedDeliveryWithoutHistoryRemainsFailedAndPublishesNothing() {
         Delivery delivery = saveDelivery(DeliveryStatus.FAILED);
 
-        assertThrows(IllegalStateException.class, () -> service.replay(delivery.getId()));
+        assertThrows(IllegalStateException.class, () -> service.replay(access, delivery.getId()));
 
         Delivery persisted = deliveries.findById(delivery.getId()).orElseThrow();
         assertEquals(DeliveryStatus.FAILED, persisted.getStatus());
@@ -184,7 +233,7 @@ class DeliveryReplayServiceIntegrationTests {
         UUID id = saveFailedDelivery(5).getId();
 
         transactions.executeWithoutResult(status -> {
-            Delivery replayed = service.replay(id).orElseThrow();
+            Delivery replayed = service.replay(access, id).orElseThrow();
             assertEquals(DeliveryStatus.PENDING, replayed.getStatus());
             assertEquals(0L, outbox.count());
             verifyNoInteractions(publisher);
@@ -199,7 +248,7 @@ class DeliveryReplayServiceIntegrationTests {
         UUID id = saveFailedDelivery(5).getId();
 
         transactions.executeWithoutResult(status -> {
-            assertEquals(6, service.replay(id).orElseThrow().getRetryCycleStartAttempt());
+            assertEquals(6, service.replay(access, id).orElseThrow().getRetryCycleStartAttempt());
             verifyNoInteractions(publisher);
             status.setRollbackOnly();
         });
@@ -216,9 +265,9 @@ class DeliveryReplayServiceIntegrationTests {
     @Test
     void repeatedReplayRequestDoesNotCreateAnotherOutboxRequest() {
         UUID id = saveFailedDelivery(5).getId();
-        service.replay(id).orElseThrow();
+        service.replay(access, id).orElseThrow();
 
-        assertThrows(DeliveryReplayNotAllowedException.class, () -> service.replay(id));
+        assertThrows(DeliveryReplayNotAllowedException.class, () -> service.replay(access, id));
 
         assertEquals(6, deliveries.findById(id).orElseThrow().getRetryCycleStartAttempt());
         assertEquals(5L, attempts.count());
@@ -235,11 +284,11 @@ class DeliveryReplayServiceIntegrationTests {
         try {
             var first = executor.submit(() -> {
                 start.await(10, TimeUnit.SECONDS);
-                return service.replay(id);
+                return service.replay(access, id);
             });
             var second = executor.submit(() -> {
                 start.await(10, TimeUnit.SECONDS);
-                return service.replay(id);
+                return service.replay(access, id);
             });
             for (var future : List.of(first, second)) {
                 try {
@@ -268,7 +317,7 @@ class DeliveryReplayServiceIntegrationTests {
     void replayedDeliveryCanSucceedWithoutSendingTwiceForDuplicateJob() throws Exception {
         UUID id = saveFailedDelivery(5).getId();
         when(sender.send(any(DeliveryWork.class))).thenReturn(204);
-        service.replay(id).orElseThrow();
+        service.replay(access, id).orElseThrow();
 
         // Simulate consuming the queued delivery ID; outbox dispatch is tested separately.
         processing.process(id);
@@ -288,7 +337,7 @@ class DeliveryReplayServiceIntegrationTests {
     @ValueSource(booleans = {false, true})
     void replayGetsFiveFreshAttemptsAndCanBeReplayedAgain(boolean networkFailure) {
         UUID id = saveFailedDelivery(5).getId();
-        service.replay(id).orElseThrow();
+        service.replay(access, id).orElseThrow();
         Instant currentTime = NOW;
         long[] delays = {5, 10, 20, 40};
 
@@ -321,7 +370,7 @@ class DeliveryReplayServiceIntegrationTests {
 
         assertEquals(10L, attempts.count());
         assertTrue(processing.claim(id).isEmpty());
-        Delivery replayedAgain = service.replay(id).orElseThrow();
+        Delivery replayedAgain = service.replay(access, id).orElseThrow();
         assertEquals(11, replayedAgain.getRetryCycleStartAttempt());
         DeliveryWork eleventh = processing.claim(id).orElseThrow();
         assertEquals(11, attempts.findById(eleventh.attemptId()).orElseThrow().getAttemptNumber());
@@ -335,7 +384,7 @@ class DeliveryReplayServiceIntegrationTests {
     void rateLimitedReplayPreservesItsNewCycleAndResumesAtSixthLifetimeAttempt() throws Exception {
         Delivery original = saveFailedDelivery(5);
         UUID id = original.getId();
-        service.replay(id).orElseThrow();
+        service.replay(access, id).orElseThrow();
         when(rateLimiter.tryAcquire(original.getEndpoint().getId())).thenReturn(
                 new DeliveryRateLimitDecision(false, Duration.ofSeconds(1)),
                 new DeliveryRateLimitDecision(true, Duration.ZERO));
@@ -368,7 +417,7 @@ class DeliveryReplayServiceIntegrationTests {
         IllegalStateException failure = new IllegalStateException("Simulated outbox storage failure");
         doThrow(failure).when(outbox).save(any(DeliveryOutboxMessage.class));
 
-        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> service.replay(id));
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> service.replay(access, id));
 
         assertSame(failure, thrown);
         Delivery persisted = deliveries.findById(id).orElseThrow();
@@ -402,10 +451,10 @@ class DeliveryReplayServiceIntegrationTests {
     }
 
     private Delivery saveDelivery(DeliveryStatus status) {
-        Event event = events.saveAndFlush(new Event("order.confirmed",
+        Event event = events.saveAndFlush(new Event(tenant, "order.confirmed",
                 JSON.readTree("{\"orderNumber\":\"128\"}"), UUID.randomUUID().toString(), NOW));
         WebhookEndpoint endpoint = endpoints.saveAndFlush(
-                new WebhookEndpoint("Warehouse", "https://example.com/webhooks", NOW, TEST_SIGNING_SECRET));
+                new WebhookEndpoint(tenant, "Warehouse", "https://example.com/webhooks", NOW, TEST_SIGNING_SECRET));
         Delivery delivery = new Delivery(event, endpoint, NOW);
         if (status != DeliveryStatus.PENDING) {
             delivery.tryStartProcessing();

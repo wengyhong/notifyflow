@@ -3,6 +3,8 @@ package com.wenghong.notifyflow.endpoint.domain;
 import java.time.Instant;
 import java.util.stream.Stream;
 
+import com.wenghong.notifyflow.identity.domain.Tenant;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -15,8 +17,25 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class WebhookEndpointTests {
+
+    private final Tenant fixtureTenant = new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z"));
+
+    @Test
+    void tenantAwareConstructorRetainsItsOwner() {
+        var tenant = new Tenant("Company A", CREATED);
+        var endpoint = new WebhookEndpoint(tenant, "Orders", "https://example.com/webhook",
+                CREATED, TEST_SIGNING_SECRET);
+        assertSame(tenant, endpoint.getTenant());
+    }
+
+    @Test
+    void tenantAwareConstructorRejectsMissingOwner() {
+        assertThrows(NullPointerException.class, () -> new WebhookEndpoint(null,
+                "Orders", "https://example.com/webhook", CREATED, TEST_SIGNING_SECRET));
+    }
 
     private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
     private static final String NEXT_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -134,7 +153,7 @@ class WebhookEndpointTests {
     }
 
     private WebhookEndpoint endpoint() {
-        return new WebhookEndpoint("Orders", "https://example.com/webhook", CREATED, TEST_SIGNING_SECRET);
+        return new WebhookEndpoint(fixtureTenant, "Orders", "https://example.com/webhook", CREATED, TEST_SIGNING_SECRET);
     }
 
     private WebhookEndpoint rotatedEndpoint() {
@@ -156,7 +175,7 @@ class WebhookEndpointTests {
         Instant now = Instant.parse("2026-10-28T00:00:00Z");
         String secret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Orders", "https://example.com/webhooks", now, secret);
 
         assertEquals(secret, endpoint.getSigningSecret());
@@ -169,7 +188,7 @@ class WebhookEndpointTests {
 
     @Test
     void constructorWithSecretRejectsNullSecret() {
-        assertThrows(NullPointerException.class, () -> new WebhookEndpoint(
+        assertThrows(NullPointerException.class, () -> new WebhookEndpoint(fixtureTenant,
                 "Orders", "https://example.com/webhooks", Instant.now(), null));
     }
 
@@ -177,7 +196,7 @@ class WebhookEndpointTests {
     void enablingDisabledEndpointUpdatesModificationTimeAndPreservesCreationTime() {
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
         Instant enabledAt = createdAt.plusSeconds(120);
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Orders", "https://example.com/webhooks", createdAt, TEST_SIGNING_SECRET);
         endpoint.changeEnabled(false, createdAt.plusSeconds(60));
 
@@ -192,7 +211,7 @@ class WebhookEndpointTests {
     void disablingAlreadyDisabledEndpointPreservesModificationTime() {
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
         Instant disabledAt = createdAt.plusSeconds(60);
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Orders", "https://example.com/webhooks", createdAt, TEST_SIGNING_SECRET);
         endpoint.changeEnabled(false, disabledAt);
 
@@ -206,7 +225,7 @@ class WebhookEndpointTests {
     @Test
     void enablingAlreadyEnabledEndpointPreservesModificationTime() {
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Order notifications", "https://example.com/webhooks/orders", createdAt, TEST_SIGNING_SECRET);
 
         endpoint.changeEnabled(true, createdAt.plusSeconds(60));
@@ -220,7 +239,7 @@ class WebhookEndpointTests {
     void disablingEndpointUpdatesModificationTimeAndPreservesCreationTime() {
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
         Instant modifiedAt = createdAt.plusSeconds(60);
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Order notifications", "https://example.com/webhooks/orders", createdAt, TEST_SIGNING_SECRET);
 
         endpoint.changeEnabled(false, modifiedAt);
@@ -234,7 +253,7 @@ class WebhookEndpointTests {
     void newEndpointStartsEnabledWithMatchingTimestamps() {
         Instant now = Instant.parse("2026-10-28T00:00:00Z");
 
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Order notifications", "https://example.com/webhooks/orders", now, TEST_SIGNING_SECRET);
 
         assertEquals("Order notifications", endpoint.getName());

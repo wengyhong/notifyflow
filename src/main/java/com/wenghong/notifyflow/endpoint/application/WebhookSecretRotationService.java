@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
 
 @Service
 public class WebhookSecretRotationService {
@@ -29,22 +30,23 @@ public class WebhookSecretRotationService {
     }
 
     @Transactional
-    public Optional<WebhookEndpoint> rotate(UUID id)
-    {
-        return repository.findByIdForUpdate(id).map(endpoint-> {
+    public Optional<WebhookEndpoint> rotate(TenantAccess access, UUID id) {
+        access.requireAdmin();
 
-            Instant now = clock.instant();
+        return repository.findByIdAndTenantIdForUpdate(id, access.tenantId())
+                .map(endpoint -> {
 
-            if(endpoint.hasActivePreviousSigningSecret(now))
-                throw new SecretRotationInProgressException();
+                    Instant now = clock.instant();
 
-            endpoint.rotateSigningSecret(generator.generate(), now, now.plusSeconds(3600));
-            publisher.publishEvent(new WebhookEndpointChangedEvent(endpoint.getId()));
+                    if (endpoint.hasActivePreviousSigningSecret(now))
+                        throw new SecretRotationInProgressException();
 
-            return endpoint;
+                    endpoint.rotateSigningSecret(generator.generate(), now, now.plusSeconds(3600));
+                    publisher.publishEvent(new WebhookEndpointChangedEvent(endpoint.getId()));
 
-        });
+                    return endpoint;
+
+                });
     }
-
 
 }

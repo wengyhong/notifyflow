@@ -16,6 +16,9 @@ import com.wenghong.notifyflow.event.domain.Event;
 import com.wenghong.notifyflow.event.persistence.EventRepository;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -40,6 +43,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @Import(PostgresTestConfiguration.class)
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class DeliveryRepositoryTests {
+
+    @Autowired private TenantRepository tenants;
+    private Tenant tenant;
+
+    @BeforeEach
+    void createFixtureTenant() {
+        tenant = tenants.saveAndFlush(new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z")));
+    }
 
     private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
@@ -301,12 +312,12 @@ class DeliveryRepositoryTests {
     }
 
     private Event saveEvent(String key) {
-        return events.saveAndFlush(new Event(
+        return events.saveAndFlush(new Event(tenant,
                 "order.confirmed", JSON.readTree("{\"orderNumber\":\"128\"}"), key, CREATED_AT));
     }
 
     private WebhookEndpoint saveEndpoint(String name) {
-        return endpoints.saveAndFlush(new WebhookEndpoint(
+        return endpoints.saveAndFlush(new WebhookEndpoint(tenant,
                 name, "https://example.com/webhooks", CREATED_AT, TEST_SIGNING_SECRET));
     }
 

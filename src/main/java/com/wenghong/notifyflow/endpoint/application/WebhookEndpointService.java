@@ -8,6 +8,9 @@ import org.springframework.stereotype.Service;
 
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
@@ -17,56 +20,60 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class WebhookEndpointService {
-
+    private final TenantRepository tenants;
     private final WebhookEndpointRepository repository;
     private final WebhookSecretGenerator generator;
 
     private final ApplicationEventPublisher publisher;
     private final WebhookUrlPolicy policy;
 
-    public WebhookEndpointService(WebhookEndpointRepository repository, WebhookSecretGenerator generator,
-            WebhookUrlPolicy policy, ApplicationEventPublisher publisher) {
+    public WebhookEndpointService(
+            WebhookEndpointRepository repository,
+            WebhookSecretGenerator generator,
+            WebhookUrlPolicy policy,
+            ApplicationEventPublisher publisher,
+            TenantRepository tenants) {
         this.repository = repository;
         this.generator = generator;
-        this.publisher = publisher;
         this.policy = policy;
+        this.publisher = publisher;
+        this.tenants = tenants;
     }
 
     @Transactional
-    public WebhookEndpoint create(String name, String url) {
+    public WebhookEndpoint create(TenantAccess access, String name, String url) {
+        access.requireAdmin();
 
         policy.validate(url);
 
-        WebhookEndpoint point = new WebhookEndpoint(name, url, Instant.now(), generator.generate());
+        Tenant tenant = tenants.getReferenceById(access.tenantId());
+
+        WebhookEndpoint point = new WebhookEndpoint(tenant, name, url, Instant.now(), generator.generate());
 
         return repository.save(point);
     }
 
     @Transactional(readOnly = true)
-    public Optional<WebhookEndpoint> findById(UUID id) {
-        return repository.findById(id);
-    }
-
-    @Transactional(readOnly = true)
-    public Page<WebhookEndpoint> findAll(Pageable pageable) {
-        return repository.findAll(pageable);
+    public Page<WebhookEndpoint> findAll(TenantAccess access, Pageable pageable) {
+        return repository.findAllByTenant_Id(access.tenantId(), pageable);
     }
 
     @Transactional
-    public Optional<WebhookEndpoint> changeEnabled(UUID id, boolean enabled) {
-        Optional<WebhookEndpoint> point = repository.findById(id);
+    public Optional<WebhookEndpoint> changeEnabled(TenantAccess access, UUID id, boolean enabled) {
+        access.requireAdmin();
 
-            return point.map(endpoint -> {
-               if (endpoint.isEnabled() != enabled) {
-            endpoint.changeEnabled(enabled, Instant.now());
 
-            publisher.publishEvent(
-                    new WebhookEndpointChangedEvent(endpoint.getId()));
-        }
+        return repository.findByIdAndTenant_Id(id, access.tenantId()).map(endpoint -> {
+            if (endpoint.isEnabled() != enabled) {
+                endpoint.changeEnabled(enabled, Instant.now());
 
-                return endpoint;
-            });
+                publisher.publishEvent(
+                        new WebhookEndpointChangedEvent(endpoint.getId()));
+            }
 
-}
+            return endpoint;
+        });
+
+    }
 
 }

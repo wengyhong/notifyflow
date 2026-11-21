@@ -7,6 +7,9 @@ import java.util.List;
 import java.util.UUID;
 
 import com.wenghong.notifyflow.endpoint.persistence.PostgresTestConfiguration;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
+import org.junit.jupiter.api.BeforeEach;
 import com.wenghong.notifyflow.event.domain.Event;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
@@ -48,15 +51,23 @@ class EventRepositoryTests {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired private TenantRepository tenants;
+    private Tenant tenant;
+
+    @BeforeEach
+    void createTenant() {
+        tenant = tenants.saveAndFlush(new Tenant("Company A", CREATED_AT));
+    }
+
     @Test
     void findsEventByIdempotencyKey() {
         JsonNode payload = JSON.readTree("{\"orderNumber\":\"128\"}");
-        Event first = new Event("order.confirmed", payload, "request-1", CREATED_AT);
-        Event second = new Event("order.confirmed", payload, "request-2", CREATED_AT);
+        Event first = new Event(tenant, "order.confirmed", payload, "request-1", CREATED_AT);
+        Event second = new Event(tenant, "order.confirmed", payload, "request-2", CREATED_AT);
         events.saveAllAndFlush(List.of(first, second));
         entityManager.clear();
 
-        Event found = events.findByIdempotencyKey("request-2").orElseThrow();
+        Event found = events.findByTenant_IdAndIdempotencyKey(tenant.getId(), "request-2").orElseThrow();
 
         assertEquals(second.getId(), found.getId());
         assertEquals("request-2", found.getIdempotencyKey());
@@ -67,11 +78,39 @@ class EventRepositoryTests {
 
     @Test
     void returnsEmptyForUnknownIdempotencyKey() {
-        events.saveAndFlush(new Event(
+        events.saveAndFlush(new Event(tenant,
                 "order.confirmed", JSON.readTree("{}"), "existing-request", CREATED_AT));
         entityManager.clear();
 
-        assertTrue(events.findByIdempotencyKey("unknown-request").isEmpty());
+        assertTrue(events.findByTenant_IdAndIdempotencyKey(tenant.getId(), "unknown-request").isEmpty());
+    }
+
+    @Test
+    void sameKeyInDifferentTenantsIsAllowedAndLookupsCannotCrossTenants() {
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", CREATED_AT));
+        Event first = events.saveAndFlush(new Event(tenant, "order.confirmed", JSON.readTree("{\"company\":\"A\"}"),
+                "shared-key", CREATED_AT));
+        Event second = events.saveAndFlush(new Event(other, "payment.failed", JSON.readTree("{\"company\":\"B\"}"),
+                "shared-key", CREATED_AT));
+        entityManager.clear();
+
+        Event firstFound = events.findByTenant_IdAndIdempotencyKey(tenant.getId(), "shared-key").orElseThrow();
+        Event secondFound = events.findByTenant_IdAndIdempotencyKey(other.getId(), "shared-key").orElseThrow();
+        assertEquals(first.getId(), firstFound.getId());
+        assertEquals(tenant.getId(), firstFound.getTenant().getId());
+        assertEquals(second.getId(), secondFound.getId());
+        assertEquals(other.getId(), secondFound.getTenant().getId());
+        assertTrue(events.findByTenant_IdAndIdempotencyKey(UUID.randomUUID(), "shared-key").isEmpty());
+    }
+
+    @Test
+    void databaseRejectsAnEventWithUnknownTenant() {
+        DataIntegrityViolationException error = assertThrows(DataIntegrityViolationException.class,
+                () -> jdbcTemplate.update("""
+                        INSERT INTO events (id, tenant_id, event_type, payload, idempotency_key, created_at)
+                        VALUES (?, ?, 'order.confirmed', '{}'::jsonb, 'bad-owner', CURRENT_TIMESTAMP)
+                        """, UUID.randomUUID(), UUID.randomUUID()));
+        assertSqlState(error, "23503");
     }
 
     @ParameterizedTest
@@ -90,7 +129,7 @@ class EventRepositoryTests {
     })
     void savesAndReloadsEventWithStructuredJsonPayload(String json) {
         JsonNode payload = JSON.readTree(json);
-        Event saved = events.saveAndFlush(new Event(
+        Event saved = events.saveAndFlush(new Event(tenant,
                 "order.confirmed", payload, "order-128-confirmed", CREATED_AT));
         UUID id = saved.getId();
         assertNotNull(id);
@@ -112,13 +151,13 @@ class EventRepositoryTests {
     @ValueSource(booleans = {false, true})
     void rejectsDuplicateIdempotencyKeyEvenWhenEventDataDiffers(boolean differentData) {
         JsonNode original = JSON.readTree("{\"orderNumber\":\"128\"}");
-        events.saveAndFlush(new Event("order.confirmed", original, "request-128", CREATED_AT));
+        events.saveAndFlush(new Event(tenant, "order.confirmed", original, "request-128", CREATED_AT));
         String eventType = differentData ? "payment.failed" : "order.confirmed";
         JsonNode payload = differentData ? JSON.readTree("{\"reason\":\"declined\"}") : original;
 
         DataIntegrityViolationException exception = assertThrows(
                 DataIntegrityViolationException.class,
-                () -> events.saveAndFlush(new Event(eventType, payload, "request-128", CREATED_AT)));
+                () -> events.saveAndFlush(new Event(tenant, eventType, payload, "request-128", CREATED_AT)));
 
         assertSqlState(exception, "23505"); // unique_violation
     }
@@ -126,8 +165,8 @@ class EventRepositoryTests {
     @Test
     void allowsSameEventDataWithDifferentIdempotencyKeys() {
         JsonNode payload = JSON.readTree("{\"orderNumber\":\"128\"}");
-        Event first = new Event("order.confirmed", payload, "request-1", CREATED_AT);
-        Event second = new Event("order.confirmed", payload, "request-2", CREATED_AT);
+        Event first = new Event(tenant, "order.confirmed", payload, "request-1", CREATED_AT);
+        Event second = new Event(tenant, "order.confirmed", payload, "request-2", CREATED_AT);
         events.saveAllAndFlush(List.of(first, second));
         entityManager.clear();
 
@@ -138,22 +177,24 @@ class EventRepositoryTests {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"event_type", "payload", "idempotency_key", "created_at"})
+    @ValueSource(strings = {"tenant_id", "event_type", "payload", "idempotency_key", "created_at"})
     void databaseRejectsNullRequiredFields(String nullColumn) {
         String eventType = nullColumn.equals("event_type") ? null : "order.confirmed";
         String payload = nullColumn.equals("payload") ? null : "{\"orderNumber\":\"128\"}";
         String key = nullColumn.equals("idempotency_key") ? null : "request-128";
         Timestamp createdAt = nullColumn.equals("created_at") ? null : Timestamp.from(CREATED_AT);
+        UUID tenantId = nullColumn.equals("tenant_id") ? null : tenant.getId();
 
         // Bypass ORM checks to verify the migration's database constraints directly.
         DataIntegrityViolationException exception = assertThrows(
                 DataIntegrityViolationException.class,
                 () -> jdbcTemplate.update("""
-                        INSERT INTO events (id, event_type, payload, idempotency_key, created_at)
-                        VALUES (?, ?, CAST(? AS jsonb), ?, ?)
-                        """, UUID.randomUUID(), eventType, payload, key, createdAt));
+                        INSERT INTO events (id, tenant_id, event_type, payload, idempotency_key, created_at)
+                        VALUES (?, ?, ?, CAST(? AS jsonb), ?, ?)
+                        """, UUID.randomUUID(), tenantId, eventType, payload, key, createdAt));
 
         assertSqlState(exception, "23502"); // not_null_violation
+        assertTrue(exception.getMostSpecificCause().getMessage().contains("\"" + nullColumn + "\""));
     }
 
     private void assertSqlState(DataIntegrityViolationException exception, String expected) {

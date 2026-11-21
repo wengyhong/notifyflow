@@ -9,7 +9,6 @@ import com.wenghong.notifyflow.event.domain.Event;
 
 public interface EventRepository extends JpaRepository<Event, UUID> {
 
-
-    Optional<Event> findByIdempotencyKey(String idempotencyKey);
+    Optional<Event> findByTenant_IdAndIdempotencyKey(UUID tenantId, String idempotencyKey);
 
 }

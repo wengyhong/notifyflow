@@ -1,5 +1,7 @@
 package com.wenghong.notifyflow.event.application;
 
+import com.wenghong.notifyflow.identity.domain.Tenant;
+
 import java.time.Instant;
 import java.util.UUID;
 
@@ -16,6 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class EventSnapshotTests {
+
+    private final Tenant fixtureTenant = new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z"));
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final UUID ID = UUID.randomUUID();
@@ -48,7 +52,7 @@ class EventSnapshotTests {
     @Test
     void factoryCopiesEventMetadataAndProtectsAgainstLaterEntityPayloadMutation() {
         JsonNode payload = JSON.readTree("{\"number\":128}");
-        Event event = new Event("order.confirmed", payload, "request-1", NOW);
+        Event event = new Event(fixtureTenant, "order.confirmed", payload, "request-1", NOW);
         ReflectionTestUtils.setField(event, "id", ID);
 
         EventSnapshot snapshot = EventSnapshot.from(event);

@@ -29,8 +29,10 @@ import static org.mockito.Mockito.when;
 
 class RedisEventIdempotencyCacheTests {
 
+    private static final UUID TENANT_ID = UUID.randomUUID();
+
     private static final String REQUEST_KEY = "order-128";
-    private static final String REDIS_KEY = "notifyflow:event:idempotency:" + REQUEST_KEY;
+    private static final String REDIS_KEY = "notifyflow:event:idempotency:" + TENANT_ID + ":" + REQUEST_KEY;
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
     @SuppressWarnings("unchecked")
     private final ValueOperations<String, String> values = mock(ValueOperations.class);
@@ -43,7 +45,7 @@ class RedisEventIdempotencyCacheTests {
     void putStoresSnapshotJsonForTwentyFourHours() {
         when(redis.opsForValue()).thenReturn(values);
 
-        cache.put(REQUEST_KEY, snapshot);
+        cache.put(TENANT_ID, REQUEST_KEY, snapshot);
 
         verify(values).set(REDIS_KEY, json.writeValueAsString(snapshot), Duration.ofHours(24));
     }
@@ -53,14 +55,14 @@ class RedisEventIdempotencyCacheTests {
         when(redis.opsForValue()).thenReturn(values);
         when(values.get(REDIS_KEY)).thenReturn(json.writeValueAsString(snapshot));
 
-        assertEquals(snapshot, cache.findByKey(REQUEST_KEY).orElseThrow());
+        assertEquals(snapshot, cache.findByKey(TENANT_ID, REQUEST_KEY).orElseThrow());
     }
 
     @Test
     void missingEntryIsCacheMiss() {
         when(redis.opsForValue()).thenReturn(values);
 
-        assertTrue(cache.findByKey(REQUEST_KEY).isEmpty());
+        assertTrue(cache.findByKey(TENANT_ID, REQUEST_KEY).isEmpty());
     }
 
     @ParameterizedTest
@@ -70,7 +72,7 @@ class RedisEventIdempotencyCacheTests {
         when(redis.opsForValue()).thenReturn(values);
         when(values.get(REDIS_KEY)).thenReturn(stored);
 
-        assertTrue(cache.findByKey(REQUEST_KEY).isEmpty());
+        assertTrue(cache.findByKey(TENANT_ID, REQUEST_KEY).isEmpty());
     }
 
     @Test
@@ -80,8 +82,8 @@ class RedisEventIdempotencyCacheTests {
         when(redis.opsForValue()).thenReturn(values);
         when(values.get(REDIS_KEY)).thenReturn(json.writeValueAsString(stored));
 
-        assertEquals(stored, cache.findByKey(REQUEST_KEY).orElseThrow());
-        assertTrue(cache.findByKey(REQUEST_KEY).orElseThrow().payload().isNull());
+        assertEquals(stored, cache.findByKey(TENANT_ID, REQUEST_KEY).orElseThrow());
+        assertTrue(cache.findByKey(TENANT_ID, REQUEST_KEY).orElseThrow().payload().isNull());
     }
 
     @ParameterizedTest
@@ -90,7 +92,7 @@ class RedisEventIdempotencyCacheTests {
         when(redis.opsForValue()).thenReturn(values);
         when(values.get(REDIS_KEY)).thenThrow(failure);
 
-        assertTrue(cache.findByKey(REQUEST_KEY).isEmpty());
+        assertTrue(cache.findByKey(TENANT_ID, REQUEST_KEY).isEmpty());
     }
 
     @ParameterizedTest
@@ -99,7 +101,7 @@ class RedisEventIdempotencyCacheTests {
         when(redis.opsForValue()).thenReturn(values);
         doThrow(failure).when(values).set(REDIS_KEY, json.writeValueAsString(snapshot), Duration.ofHours(24));
 
-        assertDoesNotThrow(() -> cache.put(REQUEST_KEY, snapshot));
+        assertDoesNotThrow(() -> cache.put(TENANT_ID, REQUEST_KEY, snapshot));
     }
 
     @Test
@@ -108,7 +110,7 @@ class RedisEventIdempotencyCacheTests {
         when(brokenJson.writeValueAsString(snapshot)).thenThrow(mock(JacksonException.class));
         var brokenCache = new RedisEventIdempotencyCache(redis, brokenJson);
 
-        assertDoesNotThrow(() -> brokenCache.put(REQUEST_KEY, snapshot));
+        assertDoesNotThrow(() -> brokenCache.put(TENANT_ID, REQUEST_KEY, snapshot));
         verifyNoInteractions(redis);
     }
 

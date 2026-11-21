@@ -7,7 +7,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 import com.wenghong.notifyflow.endpoint.domain.WebhookSubscription;
 
-public interface WebhookSubscriptionRepository extends JpaRepository<WebhookSubscription, UUID>{
+public interface WebhookSubscriptionRepository extends JpaRepository<WebhookSubscription, UUID> {
 
-    List<WebhookSubscription> findAllByEventTypeAndEndpointEnabledTrue(String eventType);
+    List<WebhookSubscription> findAllByEndpoint_Tenant_IdAndEventTypeAndEndpointEnabledTrue(
+            UUID tenantId, String eventType);
 }

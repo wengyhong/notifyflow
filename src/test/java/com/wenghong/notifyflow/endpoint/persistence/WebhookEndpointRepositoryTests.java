@@ -7,8 +7,11 @@ import java.util.List;
 import java.util.UUID;
 
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -46,13 +49,68 @@ class WebhookEndpointRepositoryTests {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @Autowired
+    private TenantRepository tenants;
+
+    private Tenant tenant;
+
+    @BeforeEach
+    void createFixtureTenant() {
+        tenant = tenants.saveAndFlush(new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z")));
+    }
+
+    @Test
+    void persistsEachEndpointsTenantWithoutMixingOwners() {
+        Instant now = Instant.parse("2026-11-20T00:00:00Z");
+        var first = tenants.saveAndFlush(new Tenant("Company A", now));
+        var second = tenants.saveAndFlush(new Tenant("Company B", now));
+        var firstEndpoint = repository.saveAndFlush(new WebhookEndpoint(first,
+                "Orders", "https://example.com/a", now, TEST_SIGNING_SECRET));
+        var secondEndpoint = repository.saveAndFlush(new WebhookEndpoint(second,
+                "Orders", "https://example.com/b", now, TEST_SIGNING_SECRET));
+        entityManager.clear();
+
+        assertEquals(first.getId(), repository.findById(firstEndpoint.getId()).orElseThrow().getTenant().getId());
+        assertEquals(second.getId(), repository.findById(secondEndpoint.getId()).orElseThrow().getTenant().getId());
+    }
+
+    @Test
+    void databaseRejectsAnUnknownTenant() {
+        DataIntegrityViolationException error = assertThrows(DataIntegrityViolationException.class,
+                () -> jdbc.update("""
+                        INSERT INTO webhook_endpoints
+                            (id, name, url, created_at, updated_at, signing_secret, tenant_id)
+                        VALUES (?, 'Orders', 'https://example.com/webhook',
+                                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)
+                        """, UUID.randomUUID(), TEST_SIGNING_SECRET, UUID.randomUUID()));
+        SQLException cause = assertInstanceOf(SQLException.class, error.getMostSpecificCause());
+        assertEquals("23503", cause.getSQLState());
+        assertTrue(cause.getMessage().contains("fk_webhook_endpoints_tenants"));
+    }
+
+    @Test
+    void tenantScopedLookupReturnsOnlyTheMatchingOwnersEndpoint() {
+        Instant now = Instant.parse("2026-11-20T00:00:00Z");
+        Tenant first = tenants.saveAndFlush(new Tenant("Company A", now));
+        Tenant second = tenants.saveAndFlush(new Tenant("Company B", now));
+        WebhookEndpoint endpoint = repository.saveAndFlush(new WebhookEndpoint(first,
+                "Orders", "https://example.com/a", now, TEST_SIGNING_SECRET));
+        entityManager.clear();
+
+        assertEquals(endpoint.getId(), repository.findByIdAndTenant_Id(endpoint.getId(), first.getId())
+                .orElseThrow().getId());
+        assertTrue(repository.findByIdAndTenant_Id(endpoint.getId(), second.getId()).isEmpty());
+        assertTrue(repository.findByIdAndTenant_Id(endpoint.getId(), UUID.randomUUID()).isEmpty());
+        assertTrue(repository.findByIdAndTenant_Id(UUID.randomUUID(), first.getId()).isEmpty());
+    }
+
     @Test
     void savesAndReloadsBothSecretsAndOverlapExpiry() {
         Instant created = Instant.parse("2026-11-17T00:00:00Z");
         Instant rotated = created.plusSeconds(60);
         Instant expires = rotated.plusSeconds(3600);
         String nextSecret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        WebhookEndpoint endpoint = repository.saveAndFlush(new WebhookEndpoint(
+        WebhookEndpoint endpoint = repository.saveAndFlush(new WebhookEndpoint(tenant,
                 "Orders", "https://example.com/webhook", created, TEST_SIGNING_SECRET));
 
         endpoint.rotateSigningSecret(nextSecret, rotated, expires);
@@ -67,6 +125,22 @@ class WebhookEndpointRepositoryTests {
         assertEquals(created, reloaded.getCreatedAt());
     }
 
+    @Test
+    void lockingLookupExcludesEndpointsOwnedByAnotherTenant() {
+        Instant now = Instant.parse("2026-11-20T00:00:00Z");
+        Tenant owner = tenants.saveAndFlush(new Tenant("Company A", now));
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", now));
+        WebhookEndpoint endpoint = repository.saveAndFlush(new WebhookEndpoint(owner,
+                "Orders", "https://example.com/webhook", now, TEST_SIGNING_SECRET));
+        entityManager.clear();
+
+        assertTrue(repository.findByIdAndTenantIdForUpdate(endpoint.getId(), other.getId()).isEmpty());
+        assertTrue(repository.findByIdAndTenantIdForUpdate(UUID.randomUUID(), owner.getId()).isEmpty());
+        WebhookEndpoint locked = repository.findByIdAndTenantIdForUpdate(endpoint.getId(), owner.getId()).orElseThrow();
+        assertEquals(endpoint.getId(), locked.getId());
+        assertEquals(owner.getId(), locked.getTenant().getId());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void databaseRejectsPartiallyPopulatedPreviousSecretPair(boolean missingSecret) {
@@ -77,11 +151,11 @@ class WebhookEndpointRepositoryTests {
         DataIntegrityViolationException error = assertThrows(DataIntegrityViolationException.class,
                 () -> jdbc.update("""
                         INSERT INTO webhook_endpoints
-                            (id, name, url, created_at, updated_at, signing_secret,
+                            (id, tenant_id, name, url, created_at, updated_at, signing_secret,
                              previous_signing_secret, previous_signing_secret_expires_at)
-                        VALUES (?, 'Orders', 'https://example.com/webhook',
+                        VALUES (?, ?, 'Orders', 'https://example.com/webhook',
                                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?)
-                        """, UUID.randomUUID(), TEST_SIGNING_SECRET, previous, expiry));
+                        """, UUID.randomUUID(), tenant.getId(), TEST_SIGNING_SECRET, previous, expiry));
 
         SQLException cause = assertInstanceOf(SQLException.class, error.getMostSpecificCause());
         assertEquals("23514", cause.getSQLState());
@@ -94,10 +168,10 @@ class WebhookEndpointRepositoryTests {
                 DataIntegrityViolationException.class,
                 () -> jdbc.update("""
                         INSERT INTO webhook_endpoints
-                            (id, name, url, created_at, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            (id, tenant_id, name, url, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         """,
-                        UUID.randomUUID(), "Orders", "https://example.com/webhook"));
+                        UUID.randomUUID(), tenant.getId(), "Orders", "https://example.com/webhook"));
 
         SQLException cause = assertInstanceOf(SQLException.class, error.getMostSpecificCause());
         assertEquals("23502", cause.getSQLState());
@@ -105,15 +179,31 @@ class WebhookEndpointRepositoryTests {
     }
 
     @Test
-    void findAllPaginatesNewestFirstAndBreaksTimestampTiesById() {
+    void databaseRejectsEndpointWithoutTenant() {
+        DataIntegrityViolationException error = assertThrows(DataIntegrityViolationException.class,
+                () -> jdbc.update("""
+                        INSERT INTO webhook_endpoints (id, name, url, created_at, updated_at, signing_secret)
+                        VALUES (?, 'Orders', 'https://example.com/webhook', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+                        """, UUID.randomUUID(), TEST_SIGNING_SECRET));
+        SQLException cause = assertInstanceOf(SQLException.class, error.getMostSpecificCause());
+        assertEquals("23502", cause.getSQLState());
+        assertTrue(cause.getMessage().contains("tenant_id"));
+    }
+
+    @Test
+    void tenantScopedPagesExcludeForeignEndpointsFromContentAndTotals() {
         Instant now = Instant.parse("2026-10-28T00:00:00Z");
-        WebhookEndpoint older = new WebhookEndpoint(
+        Tenant owner = tenants.saveAndFlush(new Tenant("Company A", now));
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", now));
+        WebhookEndpoint older = new WebhookEndpoint(owner,
                 "Older", "https://example.com/older", now.minusSeconds(60), TEST_SIGNING_SECRET);
-        WebhookEndpoint first = new WebhookEndpoint(
+        WebhookEndpoint first = new WebhookEndpoint(owner,
                 "First", "https://example.com/first", now, TEST_SIGNING_SECRET);
-        WebhookEndpoint second = new WebhookEndpoint(
+        WebhookEndpoint second = new WebhookEndpoint(owner,
                 "Second", "https://example.com/second", now, TEST_SIGNING_SECRET);
-        repository.saveAllAndFlush(List.of(first, older, second));
+        WebhookEndpoint foreign = new WebhookEndpoint(other,
+                "Foreign", "https://example.com/foreign", now.plusSeconds(60), TEST_SIGNING_SECRET);
+        repository.saveAllAndFlush(List.of(first, older, second, foreign));
 
         List<UUID> newestIds = List.of(first, second).stream()
                 .sorted(Comparator.comparing((WebhookEndpoint endpoint) ->
@@ -123,8 +213,8 @@ class WebhookEndpointRepositoryTests {
         entityManager.clear();
         Sort sort = Sort.by(Sort.Direction.DESC, "createdAt", "id");
 
-        Page<WebhookEndpoint> firstPage = repository.findAll(PageRequest.of(0, 2, sort));
-        Page<WebhookEndpoint> secondPage = repository.findAll(PageRequest.of(1, 2, sort));
+        Page<WebhookEndpoint> firstPage = repository.findAllByTenant_Id(owner.getId(), PageRequest.of(0, 2, sort));
+        Page<WebhookEndpoint> secondPage = repository.findAllByTenant_Id(owner.getId(), PageRequest.of(1, 2, sort));
 
         assertEquals(newestIds, firstPage.getContent().stream()
                 .map(WebhookEndpoint::getId).toList());
@@ -137,12 +227,25 @@ class WebhookEndpointRepositoryTests {
         assertEquals(1, secondPage.getNumber());
         assertEquals(3L, secondPage.getTotalElements());
         assertEquals(2, secondPage.getTotalPages());
+
+        Page<WebhookEndpoint> beyondLast = repository.findAllByTenant_Id(owner.getId(), PageRequest.of(5, 2, sort));
+        assertTrue(beyondLast.isEmpty());
+        assertEquals(3L, beyondLast.getTotalElements());
+        assertEquals(2, beyondLast.getTotalPages());
+
+        Page<WebhookEndpoint> otherPage = repository.findAllByTenant_Id(other.getId(), PageRequest.of(0, 2, sort));
+        assertEquals(List.of(foreign.getId()), otherPage.map(WebhookEndpoint::getId).getContent());
+        assertEquals(1L, otherPage.getTotalElements());
+
+        Page<WebhookEndpoint> unknownTenant = repository.findAllByTenant_Id(UUID.randomUUID(), PageRequest.of(0, 2, sort));
+        assertTrue(unknownTenant.isEmpty());
+        assertEquals(0L, unknownTenant.getTotalElements());
     }
 
     @Test
     void savesAndReloadsEndpointWithGeneratedIdAndAllFields() {
         Instant now = Instant.parse("2026-10-28T00:00:00Z");
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(tenant,
                 "Order notifications", "https://example.com/webhooks/orders", now, TEST_SIGNING_SECRET);
 
         WebhookEndpoint saved = repository.saveAndFlush(endpoint);

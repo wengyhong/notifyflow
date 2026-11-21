@@ -18,6 +18,9 @@ import com.wenghong.notifyflow.event.domain.Event;
 import com.wenghong.notifyflow.event.persistence.EventRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,6 +51,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class DeliveryOutboxRepositoryTests {
 
+    @Autowired private TenantRepository tenants;
+    private Tenant tenant;
+
+    @BeforeEach
+    void createFixtureTenant() {
+        tenant = tenants.saveAndFlush(new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z")));
+    }
+
     private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
     private static final Instant CREATED_AT = Instant.parse("2026-11-10T00:00:00Z");
@@ -68,6 +79,7 @@ class DeliveryOutboxRepositoryTests {
         deliveries.deleteAllInBatch();
         events.deleteAllInBatch();
         endpoints.deleteAllInBatch();
+        tenants.deleteAllInBatch();
     }
 
     @Test
@@ -252,10 +264,10 @@ class DeliveryOutboxRepositoryTests {
     }
 
     private Delivery saveDelivery() {
-        Event event = events.saveAndFlush(new Event("order.confirmed",
+        Event event = events.saveAndFlush(new Event(tenant, "order.confirmed",
                 JSON.readTree("{\"orderNumber\":\"128\"}"), UUID.randomUUID().toString(), CREATED_AT));
         WebhookEndpoint endpoint = endpoints.saveAndFlush(
-                new WebhookEndpoint("Warehouse", "https://example.com/webhooks", CREATED_AT, TEST_SIGNING_SECRET));
+                new WebhookEndpoint(tenant, "Warehouse", "https://example.com/webhooks", CREATED_AT, TEST_SIGNING_SECRET));
         return deliveries.saveAndFlush(new Delivery(event, endpoint, CREATED_AT));
     }
 

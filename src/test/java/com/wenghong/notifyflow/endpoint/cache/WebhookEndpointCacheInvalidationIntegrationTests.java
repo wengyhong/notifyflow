@@ -12,6 +12,11 @@ import com.wenghong.notifyflow.endpoint.application.WebhookSecretGenerator;
 import com.wenghong.notifyflow.endpoint.application.WebhookSecretRotationService;
 import com.wenghong.notifyflow.endpoint.application.WebhookUrlPolicy;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
+import org.springframework.security.access.AccessDeniedException;
 import com.wenghong.notifyflow.endpoint.persistence.PostgresTestConfiguration;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -57,6 +62,10 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
     @Autowired private TransactionTemplate transactions;
     @Autowired private ApplicationEventPublisher publisher;
 
+    @Autowired private TenantRepository tenants;
+    private Tenant tenant;
+    private TenantAccess access;
+
     @MockitoBean private WebhookEndpointCache cache;
     @MockitoBean private WebhookSecretGenerator generator;
     @MockitoBean private WebhookUrlPolicy policy;
@@ -64,6 +73,8 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
 
     @BeforeEach
     void configureRotation() {
+        tenant = tenants.saveAndFlush(new Tenant("Company A", NOW));
+        access = new TenantAccess(tenant.getId(), TenantRole.ADMIN);
         when(clock.instant()).thenReturn(NOW);
         when(generator.generate()).thenReturn(NEXT);
     }
@@ -71,6 +82,7 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
     @AfterEach
     void cleanIsolatedPostgres() {
         repository.deleteAllInBatch();
+        tenants.deleteAllInBatch();
     }
 
     @ParameterizedTest
@@ -79,7 +91,7 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
         UUID id = saveEndpoint(!target);
 
         transactions.executeWithoutResult(status -> {
-            endpoints.changeEnabled(id, target).orElseThrow();
+            endpoints.changeEnabled(access, id, target).orElseThrow();
             verifyNoInteractions(cache);
         });
 
@@ -94,7 +106,7 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
         UUID id = saveEndpoint(!target);
 
         transactions.executeWithoutResult(status -> {
-            endpoints.changeEnabled(id, target).orElseThrow();
+            endpoints.changeEnabled(access, id, target).orElseThrow();
             verifyNoInteractions(cache);
             status.setRollbackOnly();
         });
@@ -108,7 +120,7 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
     void unchangedEnabledValueDoesNotEvict(boolean enabled) {
         UUID id = saveEndpoint(enabled);
 
-        endpoints.changeEnabled(id, enabled).orElseThrow();
+        endpoints.changeEnabled(access, id, enabled).orElseThrow();
 
         verifyNoInteractions(cache);
     }
@@ -118,7 +130,7 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
         UUID id = saveEndpoint(true);
 
         transactions.executeWithoutResult(status -> {
-            rotations.rotate(id).orElseThrow();
+            rotations.rotate(access, id).orElseThrow();
             verifyNoInteractions(cache);
         });
 
@@ -130,11 +142,39 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
     }
 
     @Test
+    void deniedViewerChangePreservesStateTimestampAndCache() {
+        UUID id = saveEndpoint(true);
+        WebhookEndpoint before = repository.findById(id).orElseThrow();
+
+        assertThrows(AccessDeniedException.class, () -> endpoints.changeEnabled(
+                new TenantAccess(tenant.getId(), TenantRole.VIEWER), id, false));
+
+        WebhookEndpoint after = repository.findById(id).orElseThrow();
+        assertTrue(after.isEnabled());
+        assertEquals(before.getUpdatedAt(), after.getUpdatedAt());
+        verifyNoInteractions(cache);
+    }
+
+    @Test
+    void administratorFromAnotherTenantCannotChangeStateOrEvictCache() {
+        UUID id = saveEndpoint(true);
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", NOW));
+        WebhookEndpoint before = repository.findById(id).orElseThrow();
+
+        assertTrue(endpoints.changeEnabled(new TenantAccess(other.getId(), TenantRole.ADMIN), id, false).isEmpty());
+
+        WebhookEndpoint after = repository.findById(id).orElseThrow();
+        assertTrue(after.isEnabled());
+        assertEquals(before.getUpdatedAt(), after.getUpdatedAt());
+        verifyNoInteractions(cache);
+    }
+
+    @Test
     void rolledBackRotationDoesNotEvict() {
         UUID id = saveEndpoint(true);
 
         transactions.executeWithoutResult(status -> {
-            rotations.rotate(id).orElseThrow();
+            rotations.rotate(access, id).orElseThrow();
             verifyNoInteractions(cache);
             status.setRollbackOnly();
         });
@@ -145,14 +185,35 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
         verifyNoInteractions(cache);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void deniedRotationPreservesBothSecretsAndDoesNotEvictCache(boolean viewer) {
+        UUID id = saveEndpoint(true);
+        WebhookEndpoint before = repository.findById(id).orElseThrow();
+        if (viewer) {
+            assertThrows(AccessDeniedException.class, () -> rotations.rotate(
+                    new TenantAccess(tenant.getId(), TenantRole.VIEWER), id));
+        } else {
+            Tenant other = tenants.saveAndFlush(new Tenant("Company B", NOW));
+            assertTrue(rotations.rotate(new TenantAccess(other.getId(), TenantRole.ADMIN), id).isEmpty());
+        }
+
+        WebhookEndpoint after = repository.findById(id).orElseThrow();
+        assertEquals(before.getSigningSecret(), after.getSigningSecret());
+        assertEquals(before.getPreviousSigningSecret(), after.getPreviousSigningSecret());
+        assertEquals(before.getPreviousSigningSecretExpiresAt(), after.getPreviousSigningSecretExpiresAt());
+        assertEquals(before.getUpdatedAt(), after.getUpdatedAt());
+        verifyNoInteractions(generator, clock, cache);
+    }
+
     @Test
     void rejectedRotationDoesNotEvict() {
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(tenant,
                 "Warehouse", "https://example.com/webhook", NOW.minusSeconds(7200), ORIGINAL);
         endpoint.rotateSigningSecret(NEXT, NOW.minusSeconds(60), NOW.plusSeconds(60));
         UUID id = repository.saveAndFlush(endpoint).getId();
 
-        assertThrows(SecretRotationInProgressException.class, () -> rotations.rotate(id));
+        assertThrows(SecretRotationInProgressException.class, () -> rotations.rotate(access, id));
 
         verifyNoInteractions(cache, generator);
     }
@@ -161,8 +222,8 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
     void missingEndpointsDoNotEvict() {
         UUID id = UUID.randomUUID();
 
-        assertTrue(endpoints.changeEnabled(id, false).isEmpty());
-        assertTrue(rotations.rotate(id).isEmpty());
+        assertTrue(endpoints.changeEnabled(access, id, false).isEmpty());
+        assertTrue(rotations.rotate(access, id).isEmpty());
 
         verifyNoInteractions(cache, generator);
     }
@@ -175,7 +236,7 @@ class WebhookEndpointCacheInvalidationIntegrationTests {
     }
 
     private UUID saveEndpoint(boolean enabled) {
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(tenant,
                 "Warehouse", "https://example.com/webhook", NOW.minusSeconds(7200), ORIGINAL);
         endpoint.changeEnabled(enabled, NOW.minusSeconds(3600));
         return repository.saveAndFlush(endpoint).getId();

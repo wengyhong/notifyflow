@@ -1,13 +1,14 @@
-# Account registration and session authentication
+# Authentication, tenant isolation, and producer API keys
 
-NotifyFlow now supports account registration and session-cookie login through
-Spring Security. This is the authentication foundation of Milestone 8.
+Milestone 8 now includes account registration, session-cookie login, tenant-scoped
+business operations, and producer API keys. Human users manage a workspace through
+their session and tenant membership. External applications publish events using
+a key bound to one tenant.
 
-Tenant memberships exist, but endpoint, event, and delivery access is not yet
-tenant-scoped. Membership roles are not yet enforced on business operations.
-An authenticated user's ability to list endpoints currently proves authentication,
-not ownership of those endpoints. Tenant isolation and producer API keys are
-the next parts of this milestone.
+Endpoint reads, writes, subscriptions, secret rotation, and manual replay enforce
+tenant access. Events, delivery routing, database idempotency uniqueness, and Redis
+idempotency keys are tenant-scoped. Producer keys grant event publishing permission;
+they do not grant tenant administrator membership.
 
 ## Identity model
 
@@ -16,6 +17,7 @@ the next parts of this milestone.
 | `tenants` | Organization or workspace | UUID ID, display name, creation time; names need not be unique |
 | `app_users` | User identity and stored password hash | Case-insensitive unique email, enabled flag, creation time |
 | `tenant_memberships` | A user's role in one tenant | Required user and tenant foreign keys; unique `(tenant_id, user_id)` |
+| `api_keys` | A producer credential belonging to one tenant | Unique key hash; required tenant; nullable revocation timestamp |
 
 Flyway migrations V14, V15, and V16 create these tables. The
 `uq_app_users_email_lower` unique index applies to `LOWER(email)`, and
@@ -105,7 +107,7 @@ authentication is disabled.
 Login uses `application/x-www-form-urlencoded`, not a JSON credentials body.
 Spring Security's form-login filter reads the `email` and `password` parameters.
 `DatabaseUserDetailsService` loads the user by email and returns `AppUserDetails`,
-which retains the user's UUID for future membership checks. Spring's
+which retains the user's UUID for membership checks. Spring's
 authentication provider checks the password and enabled flag. Credentials are
 erased from the authenticated principal after successful authentication.
 
@@ -119,6 +121,102 @@ must fetch a fresh token after login before making another write, including
 logout. After logout, a client can fetch a new anonymous token for another login.
 Sessions currently use the servlet container's session storage; shared session
 storage across application instances has not been configured.
+
+## Tenant ownership and authorization
+
+Session-based business routes use the custom `X-Tenant-ID` header to select a
+workspace. `TenantAccessService` checks membership using that tenant ID and the
+authenticated `AppUserDetails.userId`. Request headers or JSON cannot choose the
+user's identity or membership role. A `TenantAccess` record carries the verified
+tenant ID and role into application services.
+
+| Operation | Required access |
+| --- | --- |
+| Get or list endpoints | `ADMIN` or `VIEWER` membership in the selected tenant |
+| Create or enable/disable endpoints | `ADMIN` membership |
+| Create endpoint subscriptions or rotate signing secrets | `ADMIN` membership |
+| Submit events through `POST /api/events` | User session and `ADMIN` membership |
+| Replay a failed delivery | `ADMIN` membership; both its event and endpoint must belong to the selected tenant |
+| Create or revoke producer keys | User session and `ADMIN` membership |
+| Submit events through `POST /api/producer/events` | An active producer key; tenant comes from the key |
+
+Session writes also require a valid CSRF token. Missing or malformed tenant headers
+return 400, nonmembers and insufficient roles return 403, and a resource belonging
+to another tenant is returned as 404 after membership and role checks. Producer
+requests do not use the tenant header to select an owner.
+
+V17-V21 implement the ownership transition: create the legacy workspace when
+needed, backfill old resources, introduce tenant-scoped event idempotency
+uniqueness, and finally require `tenant_id` on both events and endpoints. Assigned
+owners are preserved. Backfill does not automatically grant any user membership
+in the legacy workspace. Public resource constructors now require a tenant.
+
+`uq_events_tenant_idempotency_key` makes `(tenant_id, idempotency_key)` unique.
+The Redis key is `notifyflow:event:idempotency:<tenantId>:<idempotencyKey>`.
+Different tenants may reuse the same event type and idempotency key independently.
+Delivery creation selects only the publishing tenant's matching enabled endpoints.
+
+## Producer API keys
+
+V22 creates `api_keys`. A key has a UUID, tenant, display name, unique `key_hash`,
+creation time, and optional `revoked_at`. Names need not be unique. There is no
+automatic key expiry; a key remains active until revoked.
+
+`ApiKeyGenerator` uses `SecureRandom` to generate 32 random bytes and encodes them
+as URL-safe Base64 without padding. The `nf_` prefix plus 43 encoded characters
+produces a 46-character raw key. `ApiKeyHasher` hashes the entire UTF-8 key,
+including its prefix, with SHA-256 and stores 64 lowercase hexadecimal characters.
+This is a randomly generated credential, distinct from a human-chosen account
+password, which continues to use the password encoder.
+
+`ApiKeyService.create()` checks the admin role before generation, hashing, or
+persistence. Its transaction stores the hash and returns the raw key in the
+creation result. The raw key is not stored and has no later retrieval route.
+The creation HTTP response uses `Cache-Control: no-store`; the result and response
+records redact the raw value from `toString()`.
+
+| Route | Authentication and input | Success |
+| --- | --- | --- |
+| `POST /api/key` | User session, CSRF token, `X-Tenant-ID`, JSON with a nonblank `name` of at most 100 characters | 201 with `id`, `name`, `rawKey`, `createdAt` |
+| `POST /api/key/{id}/revoke` | User session, CSRF token, `X-Tenant-ID`; no body required | 204 with an empty body |
+| `POST /api/producer/events` | `Authorization: Bearer <rawKey>`, `Idempotency-Key`, and event JSON | 202 with `id`, `type`, `createdAt` |
+
+Revocation uses a tenant-scoped pessimistic write lock. Repeated revocation of an
+owned key returns 204 and preserves the first timestamp, including concurrent
+requests. Missing or foreign keys return 404; viewers and nonmembers receive 403.
+Revocation rolls back with an enclosing transaction.
+
+### Producer request security
+
+`ProducerSecurityConfiguration` is checked first through `@Order(1)` and matches
+`/api/producer/**`. It is stateless and does not use a user session for authentication.
+`ApiKeyAuthenticationFilter` is instantiated in that chain, rather than registered
+as a global servlet filter. It reads the Bearer header and delegates verification
+to `ApiKeyAuthenticationService`.
+
+The authentication service rejects malformed keys, hashes well-formed keys, and
+looks up an active row. `ApiKeyPrincipal` contains only the stored key ID and
+tenant ID. The filter creates an authenticated token with null credentials and
+only `EVENT_PUBLISH` authority, then clears the security context after the request,
+including when downstream processing throws. Authentication does not cache
+positive key lookups, so a committed revocation blocks the next request.
+
+Only `POST /api/producer/events` is permitted in this chain. Other producer paths
+or methods are denied. The existing session chain continues to handle management
+routes and `/api/events`; a producer key alone cannot authenticate those routes.
+CSRF is disabled only in the stateless producer chain, where the client explicitly
+sends an authorization header. Session-based management still requires CSRF.
+
+Missing, malformed, unknown, or revoked credentials return 401. The authentication
+service propagates database failures instead of returning an empty authentication result.
+Producer ingestion reuses the same validation, tenant-scoped idempotency,
+transactional delivery creation, and durable outbox as session-based ingestion.
+The controller ignores a supplied `X-Tenant-ID` when determining ownership.
+
+Producer keys identify publishing applications. They are separate from each
+endpoint's webhook signing secret, which authenticates outbound webhook messages.
+Revoking a producer key prevents future submissions; it does not cancel deliveries
+that were already accepted.
 
 ## Local verification with PowerShell
 
@@ -138,7 +236,7 @@ In a second PowerShell terminal, replace the application port as necessary and
 fetch a CSRF token while retaining its session cookie:
 
 ```powershell
-$baseUrl = "http://localhost:9185"
+$baseUrl = "http://localhost:7829"
 $csrf = Invoke-RestMethod `
   -Uri "$baseUrl/api/auth/csrf" `
   -SessionVariable notifyflowSession
@@ -198,11 +296,127 @@ resending the password:
 Invoke-WebRequest `
   -Uri "$baseUrl/api/endpoints?size=1" `
   -WebSession $notifyflowSession `
+  -Headers @{ "X-Tenant-ID" = $registered.tenantId } `
   -UseBasicParsing |
   Select-Object StatusCode
 ```
 
-Expect 200. This is an authentication check, not a tenant-isolation check.
+Expect 200. The selected tenant is the workspace created during registration.
+Cross-tenant and viewer/admin boundaries are also covered by automated tests.
+
+### Create a producer API key
+
+After login, fetch a fresh CSRF token and create a key in the registered tenant:
+
+```powershell
+$csrf = Invoke-RestMethod `
+  -Uri "$baseUrl/api/auth/csrf" `
+  -WebSession $notifyflowSession
+
+$createdKey = Invoke-RestMethod `
+  -Method Post `
+  -Uri "$baseUrl/api/key" `
+  -WebSession $notifyflowSession `
+  -Headers @{
+      "X-CSRF-TOKEN" = $csrf.token
+      "X-Tenant-ID" = $registered.tenantId
+  } `
+  -ContentType "application/json" `
+  -Body (@{ name = "Producer demo" } | ConvertTo-Json)
+
+$createdKey | Select-Object id, name, createdAt
+```
+
+Creation returns 201. Keep `$createdKey.rawKey` in this terminal for the next calls;
+the displayed metadata omits the raw value.
+
+### Publish without a user session
+
+```powershell
+$producerIdempotencyKey = [guid]::NewGuid().ToString()
+$producerBody = @{
+    type = "api.key.demo"
+    payload = @{ orderId = 128 }
+} | ConvertTo-Json -Depth 5
+
+$acceptedEvent = Invoke-RestMethod `
+  -Method Post `
+  -Uri "$baseUrl/api/producer/events" `
+  -Headers @{
+      "Authorization" = "Bearer $($createdKey.rawKey)"
+      "Idempotency-Key" = $producerIdempotencyKey
+  } `
+  -ContentType "application/json" `
+  -Body $producerBody
+
+$acceptedEvent
+```
+
+Expect 202 with event metadata. This call sends no session cookie, CSRF token, or
+tenant header. A matching subscription is not needed for event acceptance; actual
+delivery creation additionally requires an enabled subscribed endpoint in this tenant.
+
+Retry the same body and key:
+
+```powershell
+$retriedEvent = Invoke-RestMethod `
+  -Method Post `
+  -Uri "$baseUrl/api/producer/events" `
+  -Headers @{
+      "Authorization" = "Bearer $($createdKey.rawKey)"
+      "Idempotency-Key" = $producerIdempotencyKey
+  } `
+  -ContentType "application/json" `
+  -Body $producerBody
+
+$retriedEvent.id -eq $acceptedEvent.id
+```
+
+Expect `True`: the retry reuses the original event. Different content under the
+same tenant and key returns 409 instead of replacing the event.
+
+### Revoke and retry
+
+Revocation is a management operation and uses the admin session:
+
+```powershell
+$revocation = Invoke-WebRequest `
+  -UseBasicParsing `
+  -Method Post `
+  -Uri "$baseUrl/api/key/$($createdKey.id)/revoke" `
+  -WebSession $notifyflowSession `
+  -Headers @{
+      "X-CSRF-TOKEN" = $csrf.token
+      "X-Tenant-ID" = $registered.tenantId
+  }
+
+$revocation.StatusCode
+```
+
+Expect 204. Repeat the producer request with the revoked key:
+
+```powershell
+try {
+    $retry = Invoke-WebRequest `
+      -UseBasicParsing `
+      -Method Post `
+      -Uri "$baseUrl/api/producer/events" `
+      -Headers @{
+          "Authorization" = "Bearer $($createdKey.rawKey)"
+          "Idempotency-Key" = $producerIdempotencyKey
+      } `
+      -ContentType "application/json" `
+      -Body $producerBody `
+      -ErrorAction Stop
+
+    $retry.StatusCode
+} catch {
+    [int]$_.Exception.Response.StatusCode
+}
+```
+
+Expect 401 even though the event was previously accepted. Key authentication runs
+before ingestion and its idempotency cache lookup.
 
 ### Refresh CSRF and log out
 
@@ -227,6 +441,7 @@ try {
     Invoke-WebRequest `
       -Uri "$baseUrl/api/endpoints?size=1" `
       -WebSession $notifyflowSession `
+      -Headers @{ "X-Tenant-ID" = $registered.tenantId } `
       -UseBasicParsing
 } catch {
     [int]$_.Exception.Response.StatusCode
@@ -235,7 +450,7 @@ try {
 
 Expect 401.
 
-### Observed results: November 20, 2026
+### Original session verification: November 20, 2026
 
 | Step | Observed result |
 | --- | --- |
@@ -246,7 +461,48 @@ Expect 401.
 | Refresh token and log out | HTTP 204 |
 | Repeat protected read after logout | HTTP 401 |
 
+### Live producer verification: November 21, 2026
+
+The updated application ran on port 7829. This check registered a fresh demo
+workspace and kept the raw key in PowerShell variables rather than documentation.
+
+| Step | Observed result |
+| --- | --- |
+| Register demo account and workspace | User and tenant IDs returned |
+| Login | HTTP 204 |
+| Create producer key through admin session | Key metadata returned |
+| Submit event with only Bearer key and idempotency header | Event metadata returned |
+| Retry identical request | Event ID comparison returned `True` |
+| Revoke key through admin session | HTTP 204 |
+| Retry producer request using revoked key | HTTP 401 |
+
+The live check verifies publishing authentication, idempotency reuse, and
+revocation. The automated PostgreSQL-backed HTTP tests additionally verify
+cross-tenant event routing and durable delivery outbox creation.
+
 ## Automated verification
+
+The latest full `mvn -o clean verify` on November 21, 2026 passed **1,327 tests**
+with no failures, errors, or skips. This includes producer filter tests, both
+security chains, session login/logout, API key generation and hashing, committed
+creation/revocation, concurrent revocation, transaction rollback, resource tenant
+migrations, cross-tenant routing, and PostgreSQL-backed producer HTTP requests.
+
+The producer HTTP tests verify that a session cannot replace a key; a key cannot
+authenticate management routes; only event publishing is permitted; management
+CSRF remains enabled; producer requests create no authentication session; and a
+forged tenant header cannot change the key's tenant. Filter tests verify null
+credentials, `EVENT_PUBLISH` authority, and security-context cleanup on success
+and downstream failure. The database-backed tests exercise the real key verifier,
+event ingestion, subscriptions, deliveries, and outbox together.
+
+Run the current authentication/producer selection with Docker available:
+
+```powershell
+.\mvnw.cmd "-Dtest=ApiKey*Tests,ProducerEvent*Tests,EventIngestionService*Tests,SessionAuthenticationHttpTests" test
+```
+
+### Earlier registration and session checkpoints
 
 The session configuration passed 125 affected HTTP/controller tests and a full
 `clean verify` run of 948 tests before registration was added. The later
@@ -265,21 +521,32 @@ Run the registration and session selection with Docker available:
 .\mvnw.cmd "-Dtest=RegistrationPasswordPolicyTests,AccountRegistrationServiceTests,AccountRegistrationServiceIntegrationTests,RegisterAccountRequestTests,AccountRegistrationControllerTests,SessionAuthenticationHttpTests" test
 ```
 
-The session tests import the actual `SecurityConfiguration`, fetch real CSRF
+The session tests now import both security configurations, fetch real CSRF
 tokens through the controller, and verify token refresh, session rotation,
 logout cleanup, disabled HTTP Basic, and authentication/CSRF rejection.
 Database tests use isolated PostgreSQL containers. The test-scoped
 `spring-boot-starter-security-test` dependency connects MockMvc to Spring
 Security; the tests do not disable security filters.
 
-Run `.\mvnw.cmd verify` for a complete build at the next checkpoint.
+Run `.\mvnw.cmd clean verify` for a complete build.
 
-## Remaining Milestone 8 work
+## Milestone 8 checkpoint
 
-Existing business data still needs tenant ownership and a migration strategy.
-Services and repository queries must scope access to an authorized tenant,
-including event routing, endpoint management, delivery reads, replay, and secret
-rotation. Redis keys and database idempotency uniqueness must become tenant-aware.
-Producer applications also need generated API keys with hashed storage and
-tenant-bound authentication. Cross-tenant access and role enforcement require
-tests as those features are implemented.
+Implemented and tested:
+
+- Account registration, encoded passwords, session login/logout, and CSRF handling.
+- Tenant membership checks, viewer reads, and administrator management operations.
+- Required event/endpoint ownership, legacy backfill, and removal of obsolete unscoped helper queries.
+- Tenant-scoped idempotency in PostgreSQL and Redis, plus tenant-scoped delivery routing.
+- Tenant/admin checks for subscriptions, secret rotation, and manual delivery replay.
+- Generated producer keys with hash-only storage, one-time creation responses, and locked revocation.
+- Stateless producer authentication and event ingestion, isolated from management sessions.
+- Live creation, publishing, idempotent retry, and revocation verification.
+
+Producer keys grant only `EVENT_PUBLISH`; endpoint management requires an admin
+user session. Keys currently have no automatic expiry, and previously issued raw
+keys cannot be retrieved. User sessions still use servlet-container storage
+rather than shared session storage.
+
+This document records the implementation checkpoint before the milestone review
+and commit. The next larger roadmap area is the SvelteKit dashboard.

@@ -18,6 +18,6 @@ public class EventIdempotencyCacheRequestedEventListener {
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void handle(EventIdempotencyCacheRequestedEvent event) {
-        cache.put(event.idempotencyKey(), event.snapshot());
+        cache.put(event.tenantId(), event.idempotencyKey(), event.snapshot());
     }
 }

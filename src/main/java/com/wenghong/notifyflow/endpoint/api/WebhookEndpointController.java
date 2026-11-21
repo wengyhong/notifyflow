@@ -9,9 +9,11 @@ import org.springframework.data.web.PageableDefault;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -21,6 +23,9 @@ import com.wenghong.notifyflow.endpoint.application.WebhookEndpointQueryService;
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointService;
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointSnapshot;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.application.TenantAccessService;
+import com.wenghong.notifyflow.identity.security.AppUserDetails;
 
 import jakarta.validation.Valid;
 
@@ -34,17 +39,28 @@ public class WebhookEndpointController {
 
         private final WebhookEndpointService service;
         private final WebhookEndpointQueryService queryService;
+        private final TenantAccessService tenantAccessService;
 
-        public WebhookEndpointController(WebhookEndpointService service, WebhookEndpointQueryService query) {
+        public WebhookEndpointController(
+                        WebhookEndpointService service,
+                        WebhookEndpointQueryService query,
+                        TenantAccessService tenantAccessService) {
                 this.service = service;
                 this.queryService = query;
+                this.tenantAccessService = tenantAccessService;
         }
 
         @PostMapping()
         @ResponseStatus(HttpStatus.CREATED)
         public WebhookEndpointCreatedResponse create(
+
+                        @AuthenticationPrincipal AppUserDetails user,
+                        @RequestHeader("X-Tenant-ID") UUID tenantId,
                         @RequestBody @Valid CreateWebhookEndpointRequest request) {
-                WebhookEndpoint point = service.create(request.name(), request.url());
+
+                TenantAccess access = tenantAccessService.requireAccess(tenantId, user.getUserId());
+
+                WebhookEndpoint point = service.create(access, request.name(), request.url());
 
                 return new WebhookEndpointCreatedResponse(
                                 point.getId(),
@@ -59,25 +75,42 @@ public class WebhookEndpointController {
 
         @GetMapping("/{id}")
         public ResponseEntity<WebhookEndpointResponse> findById(
+                        @AuthenticationPrincipal AppUserDetails user,
+                        @RequestHeader("X-Tenant-ID") UUID tenantId,
                         @PathVariable UUID id) {
-                return queryService.findById(id).map(this::toResponse).map(ResponseEntity::ok)
+
+                TenantAccess access = tenantAccessService.requireAccess(tenantId, user.getUserId());
+
+                return queryService.findById(access, id)
+                                .map(this::toResponse)
+                                .map(ResponseEntity::ok)
                                 .orElseGet(() -> ResponseEntity.notFound().build());
         }
 
         @GetMapping
         public WebhookEndpointPageResponse findAll(
+                        @AuthenticationPrincipal AppUserDetails user,
+                        @RequestHeader("X-Tenant-ID") UUID tenantId,
                         @PageableDefault(size = 20, sort = { "createdAt",
                                         "id" }, direction = Sort.Direction.DESC) Pageable pageable) {
-                Page<WebhookEndpointResponse> page = service.findAll(pageable).map(this::toResponse);
+
+                TenantAccess access = tenantAccessService.requireAccess(tenantId, user.getUserId());
+                Page<WebhookEndpointResponse> page = service.findAll(access, pageable).map(this::toResponse);
 
                 return toPageResponse(page);
         }
 
         @PatchMapping("/{id}/enabled")
         public ResponseEntity<WebhookEndpointResponse> changeEnabled(
+                        @AuthenticationPrincipal AppUserDetails user,
+                        @RequestHeader("X-Tenant-ID") UUID tenantId,
                         @PathVariable UUID id,
                         @Valid @RequestBody ChangeWebhookEndpointEnabledRequest request) {
-                return service.changeEnabled(id, request.enabled()).map(this::toResponse).map(ResponseEntity::ok)
+
+                TenantAccess access = tenantAccessService.requireAccess(tenantId, user.getUserId());
+
+                return service.changeEnabled(access, id, request.enabled()).map(this::toResponse)
+                                .map(ResponseEntity::ok)
                                 .orElseGet(() -> ResponseEntity.notFound().build());
         }
 

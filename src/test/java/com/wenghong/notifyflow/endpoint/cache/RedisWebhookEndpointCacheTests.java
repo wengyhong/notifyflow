@@ -32,6 +32,8 @@ import static org.mockito.Mockito.when;
 
 class RedisWebhookEndpointCacheTests {
 
+    private static final UUID TENANT_ID = UUID.fromString("e8d0c4f9-28df-4070-a6a4-052a05c68236");
+
     private static final UUID ID = UUID.fromString("1990fcb2-3db0-4664-b949-3892111ba544");
     private static final String KEY = "notifyflow:endpoint:" + ID;
     private static final Instant CREATED = Instant.parse("2026-11-18T00:00:00.123456Z");
@@ -52,7 +54,8 @@ class RedisWebhookEndpointCacheTests {
         verify(values).set(eq(KEY), value.capture(), eq(Duration.ofSeconds(60)));
         assertEquals(snapshot, json.readValue(value.getValue(), WebhookEndpointSnapshot.class));
         var tree = json.readTree(value.getValue());
-        assertEquals(6, tree.size());
+        assertEquals(7, tree.size());
+        assertEquals(TENANT_ID.toString(), tree.get("tenantId").asString());
         assertFalse(tree.has("signingSecret"));
         assertFalse(tree.has("previousSigningSecret"));
         assertFalse(tree.has("previousSigningSecretExpiresAt"));
@@ -137,7 +140,7 @@ class RedisWebhookEndpointCacheTests {
     }
 
     private WebhookEndpointSnapshot snapshot(boolean enabled) {
-        return new WebhookEndpointSnapshot(ID, "Warehouse \"東京\"", "https://example.com/webhook",
+        return new WebhookEndpointSnapshot(ID, TENANT_ID, "Warehouse \"東京\"", "https://example.com/webhook",
                 enabled, CREATED, CREATED.plusSeconds(10));
     }
 }

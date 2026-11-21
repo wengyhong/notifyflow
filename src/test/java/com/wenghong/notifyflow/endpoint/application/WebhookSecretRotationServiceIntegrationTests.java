@@ -11,6 +11,10 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.persistence.PostgresTestConfiguration;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
@@ -61,8 +65,14 @@ class WebhookSecretRotationServiceIntegrationTests {
     @MockitoBean
     private Clock clock;
 
+    @Autowired private TenantRepository tenants;
+    private Tenant tenant;
+    private TenantAccess access;
+
     @BeforeEach
     void fixedTimeAndGeneratedSecret() {
+        tenant = tenants.saveAndFlush(new Tenant("Company A", NOW));
+        access = new TenantAccess(tenant.getId(), TenantRole.ADMIN);
         when(clock.instant()).thenReturn(NOW);
         when(generator.generate()).thenReturn(NEXT);
     }
@@ -70,6 +80,7 @@ class WebhookSecretRotationServiceIntegrationTests {
     @AfterEach
     void cleanIsolatedDatabase() {
         repository.deleteAllInBatch();
+        tenants.deleteAllInBatch();
     }
 
     @Test
@@ -77,7 +88,7 @@ class WebhookSecretRotationServiceIntegrationTests {
         UUID id = saveEndpoint();
         assertEquals(0L, version(id));
 
-        service.rotate(id).orElseThrow();
+        service.rotate(access, id).orElseThrow();
 
         WebhookEndpoint reloaded = repository.findById(id).orElseThrow();
         assertEquals(NEXT, reloaded.getSigningSecret());
@@ -95,7 +106,7 @@ class WebhookSecretRotationServiceIntegrationTests {
     void staleDetachedUpdateCannotOverwriteRotatedSecrets() {
         UUID id = saveEndpoint();
         WebhookEndpoint stale = repository.findById(id).orElseThrow();
-        service.rotate(id).orElseThrow();
+        service.rotate(access, id).orElseThrow();
 
         stale.changeEnabled(true, NOW.plusSeconds(1));
         assertThrows(OptimisticLockingFailureException.class, () -> repository.saveAndFlush(stale));
@@ -120,7 +131,7 @@ class WebhookSecretRotationServiceIntegrationTests {
 
             try {
                 assertTrue(loadedBeforeRotation.await(5, TimeUnit.SECONDS));
-                service.rotate(id).orElseThrow();
+                service.rotate(access, id).orElseThrow();
             } finally {
                 rotationCommitted.countDown();
             }
@@ -135,7 +146,7 @@ class WebhookSecretRotationServiceIntegrationTests {
 
     @Test
     void missingEndpointDoesNotGenerateSecretOrInsertRow() {
-        assertTrue(service.rotate(UUID.randomUUID()).isEmpty());
+        assertTrue(service.rotate(access, UUID.randomUUID()).isEmpty());
         assertEquals(0, repository.count());
         verifyNoInteractions(generator);
     }
@@ -143,9 +154,9 @@ class WebhookSecretRotationServiceIntegrationTests {
     @Test
     void activeOverlapRejectsSecondRotationAndPreservesCommittedSecrets() {
         UUID id = saveEndpoint();
-        service.rotate(id);
+        service.rotate(access, id);
 
-        assertThrows(SecretRotationInProgressException.class, () -> service.rotate(id));
+        assertThrows(SecretRotationInProgressException.class, () -> service.rotate(access, id));
 
         WebhookEndpoint reloaded = repository.findById(id).orElseThrow();
         assertEquals(NEXT, reloaded.getSigningSecret());
@@ -158,12 +169,12 @@ class WebhookSecretRotationServiceIntegrationTests {
     @ValueSource(longs = {0, 1})
     void rotationSucceedsAtOrAfterPreviousExpiry(long secondsAfterExpiry) {
         UUID id = saveEndpoint();
-        service.rotate(id);
+        service.rotate(access, id);
         Instant secondRotation = NOW.plusSeconds(3600 + secondsAfterExpiry);
         when(clock.instant()).thenReturn(secondRotation);
         when(generator.generate()).thenReturn(THIRD);
 
-        service.rotate(id);
+        service.rotate(access, id);
 
         WebhookEndpoint reloaded = repository.findById(id).orElseThrow();
         assertEquals(THIRD, reloaded.getSigningSecret());
@@ -177,7 +188,7 @@ class WebhookSecretRotationServiceIntegrationTests {
         UUID id = saveEndpoint();
 
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
-            service.rotate(id).orElseThrow();
+            service.rotate(access, id).orElseThrow();
             status.setRollbackOnly();
         });
 
@@ -189,7 +200,7 @@ class WebhookSecretRotationServiceIntegrationTests {
         UUID id = saveEndpoint();
         when(generator.generate()).thenThrow(new IllegalStateException("Test generator failure"));
 
-        assertThrows(IllegalStateException.class, () -> service.rotate(id));
+        assertThrows(IllegalStateException.class, () -> service.rotate(access, id));
 
         assertOriginalState(id);
     }
@@ -201,7 +212,7 @@ class WebhookSecretRotationServiceIntegrationTests {
         Callable<String> rotate = () -> {
             start.await(5, TimeUnit.SECONDS);
             try {
-                service.rotate(id).orElseThrow();
+                service.rotate(access, id).orElseThrow();
                 return "rotated";
             } catch (SecretRotationInProgressException exception) {
                 return "conflict";
@@ -223,7 +234,7 @@ class WebhookSecretRotationServiceIntegrationTests {
     }
 
     private UUID saveEndpoint() {
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(tenant,
                 "Orders", "https://example.com/webhook", NOW.minusSeconds(7200), ORIGINAL);
         endpoint.changeEnabled(false, NOW.minusSeconds(7100));
         return repository.saveAndFlush(endpoint).getId();

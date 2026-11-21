@@ -9,6 +9,9 @@ import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.domain.WebhookSubscription;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,6 +34,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class WebhookSubscriptionRepositoryTests {
 
+    @Autowired private TenantRepository tenants;
+    private Tenant tenant;
+
+    @BeforeEach
+    void createFixtureTenant() {
+        tenant = tenants.saveAndFlush(new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z")));
+    }
+
     private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
     @Autowired
@@ -46,10 +57,14 @@ class WebhookSubscriptionRepositoryTests {
     private JdbcTemplate jdbcTemplate;
 
     @Test
-    void matchingQueryReturnsOnlyRequestedEventTypeWithEnabledEndpoint() {
+    void matchingQueryReturnsOnlySelectedTenantsRequestedEventTypeWithEnabledEndpoint() {
         WebhookEndpoint warehouse = saveEndpoint("Warehouse");
         WebhookEndpoint email = saveEndpoint("Email");
         WebhookEndpoint finance = saveEndpoint("Finance");
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", Instant.parse("2026-11-20T00:00:00Z")));
+        WebhookEndpoint foreign = endpoints.saveAndFlush(new WebhookEndpoint(other,
+                "Foreign receiver", "https://example.com/foreign",
+                Instant.parse("2026-11-20T00:00:00Z"), TEST_SIGNING_SECRET));
         email.changeEnabled(false, Instant.parse("2026-10-29T00:01:00Z"));
 
         WebhookSubscription warehouseSubscription =
@@ -57,15 +72,22 @@ class WebhookSubscriptionRepositoryTests {
         subscriptions.saveAllAndFlush(List.of(
                 warehouseSubscription,
                 new WebhookSubscription(email, "order.confirmed"),
-                new WebhookSubscription(finance, "payment.failed")));
+                new WebhookSubscription(finance, "payment.failed"),
+                new WebhookSubscription(foreign, "order.confirmed")));
         entityManager.clear();
 
         List<WebhookSubscription> matches =
-                subscriptions.findAllByEventTypeAndEndpointEnabledTrue("order.confirmed");
+                subscriptions.findAllByEndpoint_Tenant_IdAndEventTypeAndEndpointEnabledTrue(
+                        tenant.getId(), "order.confirmed");
 
         assertEquals(List.of(warehouseSubscription.getId()), matches.stream()
                 .map(WebhookSubscription::getId).toList());
         assertEquals(warehouse.getId(), matches.getFirst().getEndpoint().getId());
+        assertEquals(List.of(foreign.getId()), subscriptions
+                .findAllByEndpoint_Tenant_IdAndEventTypeAndEndpointEnabledTrue(other.getId(), "order.confirmed")
+                .stream().map(subscription -> subscription.getEndpoint().getId()).toList());
+        assertEquals(List.of(), subscriptions
+                .findAllByEndpoint_Tenant_IdAndEventTypeAndEndpointEnabledTrue(UUID.randomUUID(), "order.confirmed"));
     }
 
     @Test
@@ -162,7 +184,7 @@ class WebhookSubscriptionRepositoryTests {
     }
 
     private WebhookEndpoint saveEndpoint(String name) {
-        return endpoints.saveAndFlush(new WebhookEndpoint(
+        return endpoints.saveAndFlush(new WebhookEndpoint(tenant,
                 name, "https://example.com/webhooks",
                 Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET));
     }

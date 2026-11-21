@@ -10,6 +10,12 @@ import com.wenghong.notifyflow.endpoint.application.WebhookEndpointQueryService;
 import com.wenghong.notifyflow.endpoint.application.WebhookEndpointSnapshot;
 import com.wenghong.notifyflow.endpoint.application.InvalidWebhookUrlException;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.application.TenantAccessService;
+import com.wenghong.notifyflow.identity.domain.AppUser;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
+import com.wenghong.notifyflow.identity.security.AppUserDetails;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -26,9 +32,13 @@ import org.springframework.data.domain.Sort;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.mockito.Mockito.mock;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.anonymous;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -55,7 +65,7 @@ class WebhookEndpointControllerTests {
     @Test
     @WithAnonymousUser
     void anonymousEndpointCreationIsRejectedBeforeCallingService() throws Exception {
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest().with(anonymous())
                         .accept(MediaType.APPLICATION_JSON)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"Orders\",\"url\":\"https://example.com/webhook\"}"))
@@ -81,6 +91,45 @@ class WebhookEndpointControllerTests {
     }
 
     private static final String SIGNING_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    private static final UUID USER_ID = UUID.randomUUID();
+    private static final UUID TENANT_ID = UUID.randomUUID();
+    private static final TenantAccess ACCESS = new TenantAccess(TENANT_ID, TenantRole.ADMIN);
+
+    @MockitoBean
+    private TenantAccessService tenantAccessService;
+
+    @BeforeEach
+    void configureVerifiedMembership() {
+        when(tenantAccessService.requireAccess(TENANT_ID, USER_ID)).thenReturn(ACCESS);
+    }
+
+    private MockHttpServletRequestBuilder createRequest() {
+        AppUser account = new AppUser("admin@example.com", "unused-test-hash", Instant.parse("2026-11-20T00:00:00Z"));
+        ReflectionTestUtils.setField(account, "id", USER_ID);
+        return post("/api/endpoints").with(user(new AppUserDetails(account)))
+                .with(csrf()).header("X-Tenant-ID", TENANT_ID);
+    }
+
+    private MockHttpServletRequestBuilder detailRequest(Object id) {
+        AppUser account = new AppUser("admin@example.com", "unused-test-hash", Instant.parse("2026-11-20T00:00:00Z"));
+        ReflectionTestUtils.setField(account, "id", USER_ID);
+        return get("/api/endpoints/{id}", id).with(user(new AppUserDetails(account)))
+                .header("X-Tenant-ID", TENANT_ID);
+    }
+
+    private MockHttpServletRequestBuilder listRequest() {
+        AppUser account = new AppUser("admin@example.com", "unused-test-hash", Instant.parse("2026-11-20T00:00:00Z"));
+        ReflectionTestUtils.setField(account, "id", USER_ID);
+        return get("/api/endpoints").with(user(new AppUserDetails(account)))
+                .header("X-Tenant-ID", TENANT_ID);
+    }
+
+    private MockHttpServletRequestBuilder patchRequest(Object id) {
+        AppUser account = new AppUser("admin@example.com", "unused-test-hash", Instant.parse("2026-11-20T00:00:00Z"));
+        ReflectionTestUtils.setField(account, "id", USER_ID);
+        return patch("/api/endpoints/{id}/enabled", id).with(user(new AppUserDetails(account)))
+                .header("X-Tenant-ID", TENANT_ID);
+    }
 
     @Autowired
     private MockMvc mockMvc;
@@ -95,10 +144,10 @@ class WebhookEndpointControllerTests {
     void policyRejectionReturnsBadRequestProblemDetail() throws Exception {
         String url = "https://example.com/webhooks";
         String detail = "Webhook URL must not contain credentials";
-        when(service.create("Orders", url))
+        when(service.create(ACCESS, "Orders", url))
                 .thenThrow(new InvalidWebhookUrlException(detail));
 
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"name":"Orders","url":"https://example.com/webhooks"}
@@ -111,7 +160,7 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.instance").value("/api/endpoints"))
                 .andExpect(jsonPath("$.signingSecret").doesNotHaveJsonPath());
 
-        verify(service).create("Orders", url);
+        verify(service).create(ACCESS, "Orders", url);
     }
 
     @ParameterizedTest
@@ -128,9 +177,9 @@ class WebhookEndpointControllerTests {
         when(endpoint.getCreatedAt()).thenReturn(createdAt);
         when(endpoint.getUpdatedAt()).thenReturn(updatedAt);
         when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
-        when(service.changeEnabled(id, enabled)).thenReturn(Optional.of(endpoint));
+        when(service.changeEnabled(ACCESS, id, enabled)).thenReturn(Optional.of(endpoint));
 
-        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id).with(csrf())
+        mockMvc.perform(patchRequest(id).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"enabled\":%s}".formatted(enabled)))
                 .andExpect(status().isOk())
@@ -143,22 +192,22 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.updatedAt").value(updatedAt.toString()))
                 .andExpect(jsonPath("$.signingSecret").doesNotHaveJsonPath());
 
-        verify(service).changeEnabled(id, enabled);
+        verify(service).changeEnabled(ACCESS, id, enabled);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void changeEnabledReturnsNotFoundForMissingEndpoint(boolean enabled) throws Exception {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        when(service.changeEnabled(id, enabled)).thenReturn(Optional.empty());
+        when(service.changeEnabled(ACCESS, id, enabled)).thenReturn(Optional.empty());
 
-        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id).with(csrf())
+        mockMvc.perform(patchRequest(id).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"enabled\":%s}".formatted(enabled)))
                 .andExpect(status().isNotFound())
                 .andExpect(content().string(""));
 
-        verify(service).changeEnabled(id, enabled);
+        verify(service).changeEnabled(ACCESS, id, enabled);
     }
 
     @ParameterizedTest
@@ -167,7 +216,7 @@ class WebhookEndpointControllerTests {
     void changeEnabledRejectsInvalidBodyWithoutCallingService(String requestBody) throws Exception {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
 
-        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id).with(csrf())
+        mockMvc.perform(patchRequest(id).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
                 .andExpect(status().isBadRequest());
@@ -177,7 +226,7 @@ class WebhookEndpointControllerTests {
 
     @Test
     void changeEnabledRejectsMalformedUuid() throws Exception {
-        mockMvc.perform(patch("/api/endpoints/{id}/enabled", "not-a-uuid").with(csrf())
+        mockMvc.perform(patchRequest("not-a-uuid").with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"enabled\":false}"))
                 .andExpect(status().isBadRequest());
@@ -189,7 +238,7 @@ class WebhookEndpointControllerTests {
     void changeEnabledRejectsUnsupportedContentType() throws Exception {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
 
-        mockMvc.perform(patch("/api/endpoints/{id}/enabled", id).with(csrf())
+        mockMvc.perform(patchRequest(id).with(csrf())
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("false"))
                 .andExpect(status().isUnsupportedMediaType());
@@ -201,9 +250,9 @@ class WebhookEndpointControllerTests {
     void findAllUsesDefaultPaginationAndReturnsEmptyPage() throws Exception {
         PageRequest pageable = PageRequest.of(
                 0, 20, Sort.by(Sort.Direction.DESC, "createdAt", "id"));
-        when(service.findAll(pageable)).thenReturn(Page.empty(pageable));
+        when(service.findAll(ACCESS, pageable)).thenReturn(Page.empty(pageable));
 
-        mockMvc.perform(get("/api/endpoints"))
+        mockMvc.perform(listRequest())
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.content").isArray())
@@ -213,7 +262,7 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.totalElements").value(0))
                 .andExpect(jsonPath("$.totalPages").value(0));
 
-        verify(service).findAll(pageable);
+        verify(service).findAll(ACCESS, pageable);
     }
 
     @Test
@@ -239,10 +288,10 @@ class WebhookEndpointControllerTests {
         when(secondEndpoint.getUpdatedAt()).thenReturn(now);
         when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
         when(secondEndpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
-        when(service.findAll(pageable))
+        when(service.findAll(ACCESS, pageable))
                 .thenReturn(new PageImpl<>(List.of(endpoint, secondEndpoint), pageable, 5));
 
-        mockMvc.perform(get("/api/endpoints")
+        mockMvc.perform(listRequest()
                         .param("page", "1")
                         .param("size", "2")
                         .param("sort", "name,asc", "id,asc"))
@@ -268,17 +317,17 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.totalElements").value(5))
                 .andExpect(jsonPath("$.totalPages").value(3));
 
-        verify(service).findAll(pageable);
+        verify(service).findAll(ACCESS, pageable);
     }
 
     @Test
     void findAllReturnsEmptyContentBeyondLastPageWhilePreservingTotals() throws Exception {
         PageRequest pageable = PageRequest.of(
                 5, 2, Sort.by(Sort.Direction.DESC, "createdAt", "id"));
-        when(service.findAll(pageable))
+        when(service.findAll(ACCESS, pageable))
                 .thenReturn(new PageImpl<>(List.of(), pageable, 3));
 
-        mockMvc.perform(get("/api/endpoints").param("page", "5").param("size", "2"))
+        mockMvc.perform(listRequest().param("page", "5").param("size", "2"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.content").isArray())
                 .andExpect(jsonPath("$.content").isEmpty())
@@ -287,7 +336,7 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.totalElements").value(3))
                 .andExpect(jsonPath("$.totalPages").value(2));
 
-        verify(service).findAll(pageable);
+        verify(service).findAll(ACCESS, pageable);
     }
 
     @ParameterizedTest
@@ -297,10 +346,10 @@ class WebhookEndpointControllerTests {
         Instant now = Instant.parse("2026-10-28T00:00:00Z");
         Instant updated = now.plusSeconds(60);
         WebhookEndpointSnapshot snapshot = new WebhookEndpointSnapshot(
-                id, "Orders", "https://example.com/webhooks", enabled, now, updated);
-        when(queryService.findById(id)).thenReturn(Optional.of(snapshot));
+                id, TENANT_ID, "Orders", "https://example.com/webhooks", enabled, now, updated);
+        when(queryService.findById(ACCESS, id)).thenReturn(Optional.of(snapshot));
 
-        mockMvc.perform(get("/api/endpoints/{id}", id))
+        mockMvc.perform(detailRequest(id))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.id").value(id.toString()))
@@ -313,26 +362,26 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.previousSigningSecret").doesNotHaveJsonPath())
                 .andExpect(jsonPath("$.previousSigningSecretExpiresAt").doesNotHaveJsonPath());
 
-        verify(queryService).findById(id);
+        verify(queryService).findById(ACCESS, id);
         verifyNoInteractions(service);
     }
 
     @Test
     void findByIdReturnsNotFoundWhenEndpointDoesNotExist() throws Exception {
         UUID id = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        when(queryService.findById(id)).thenReturn(Optional.empty());
+        when(queryService.findById(ACCESS, id)).thenReturn(Optional.empty());
 
-        mockMvc.perform(get("/api/endpoints/{id}", id))
+        mockMvc.perform(detailRequest(id))
                 .andExpect(status().isNotFound())
                 .andExpect(content().string(""));
 
-        verify(queryService).findById(id);
+        verify(queryService).findById(ACCESS, id);
         verifyNoInteractions(service);
     }
 
     @Test
     void findByIdRejectsMalformedUuid() throws Exception {
-        mockMvc.perform(get("/api/endpoints/{id}", "not-a-uuid"))
+        mockMvc.perform(detailRequest("not-a-uuid"))
                 .andExpect(status().isBadRequest());
 
         verifyNoInteractions(service, queryService);
@@ -349,11 +398,11 @@ class WebhookEndpointControllerTests {
         when(endpoint.isEnabled()).thenReturn(true);
         when(endpoint.getCreatedAt()).thenReturn(now);
         when(endpoint.getUpdatedAt()).thenReturn(now);
-        when(service.create("Orders", "https://example.com/webhooks"))
+        when(service.create(ACCESS, "Orders", "https://example.com/webhooks"))
                 .thenReturn(endpoint);
         when(endpoint.getSigningSecret()).thenReturn(SIGNING_SECRET);
 
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -371,7 +420,7 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.updatedAt").value(now.toString()))
                 .andExpect(jsonPath("$.signingSecret").value(SIGNING_SECRET));
 
-        verify(service).create("Orders", "https://example.com/webhooks");
+        verify(service).create(ACCESS, "Orders", "https://example.com/webhooks");
     }
 
     @ParameterizedTest
@@ -382,7 +431,7 @@ class WebhookEndpointControllerTests {
             "https://"
     })
     void createRejectsInvalidWebhookUrl(String url) throws Exception {
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -410,9 +459,9 @@ class WebhookEndpointControllerTests {
         when(endpoint.isEnabled()).thenReturn(true);
         when(endpoint.getCreatedAt()).thenReturn(now);
         when(endpoint.getUpdatedAt()).thenReturn(now);
-        when(service.create("Orders", url)).thenReturn(endpoint);
+        when(service.create(ACCESS, "Orders", url)).thenReturn(endpoint);
 
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -424,12 +473,12 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.id").value(id.toString()))
                 .andExpect(jsonPath("$.url").value(url));
 
-        verify(service).create("Orders", url);
+        verify(service).create(ACCESS, "Orders", url);
     }
 
     @Test
     void createRejectsBlankName() throws Exception {
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -444,7 +493,7 @@ class WebhookEndpointControllerTests {
 
     @Test
     void createRejectsBlankUrl() throws Exception {
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -461,7 +510,7 @@ class WebhookEndpointControllerTests {
     void createRejectsNameLongerThan100Characters() throws Exception {
         String name = "x".repeat(101);
 
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -484,7 +533,7 @@ class WebhookEndpointControllerTests {
             "{\"name\":\"Orders\",\"url\":\"\"}"
     })
     void createRejectsMissingNullOrEmptyRequiredFields(String requestBody) throws Exception {
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
                 .andExpect(status().isBadRequest());
@@ -505,9 +554,9 @@ class WebhookEndpointControllerTests {
         when(endpoint.isEnabled()).thenReturn(true);
         when(endpoint.getCreatedAt()).thenReturn(now);
         when(endpoint.getUpdatedAt()).thenReturn(now);
-        when(service.create(name, url)).thenReturn(endpoint);
+        when(service.create(ACCESS, name, url)).thenReturn(endpoint);
 
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -519,13 +568,13 @@ class WebhookEndpointControllerTests {
                 .andExpect(jsonPath("$.id").value(id.toString()))
                 .andExpect(jsonPath("$.name").value(name));
 
-        verify(service).create(name, url);
+        verify(service).create(ACCESS, name, url);
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"{", "", "null"})
     void createRejectsMalformedOrMissingBody(String requestBody) throws Exception {
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
                 .andExpect(status().isBadRequest());
@@ -535,7 +584,7 @@ class WebhookEndpointControllerTests {
 
     @Test
     void createRejectsUnsupportedContentType() throws Exception {
-        mockMvc.perform(post("/api/endpoints").with(csrf())
+        mockMvc.perform(createRequest()
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("Orders"))
                 .andExpect(status().isUnsupportedMediaType());

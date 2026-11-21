@@ -1,0 +1,10 @@
+INSERT INTO tenants(id, name,created_at)
+SELECT
+'00000000-0000-0000-0000-000000000001'::UUID,
+'Legacy workspace',
+CURRENT_TIMESTAMP
+WHERE EXISTS(
+    SELECT 1 FROM webhook_endpoints
+)
+OR EXISTS
+(SELECT 1 FROM events);

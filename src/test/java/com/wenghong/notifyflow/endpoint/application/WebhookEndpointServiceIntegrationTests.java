@@ -8,6 +8,12 @@ import java.util.UUID;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.persistence.PostgresTestConfiguration;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -45,6 +51,23 @@ class WebhookEndpointServiceIntegrationTests {
     @MockitoBean
     private WebhookHostResolver resolver;
 
+    @Autowired
+    private TenantRepository tenants;
+
+    private TenantAccess access;
+
+    @BeforeEach
+    void createOwningTenant() {
+        Tenant tenant = tenants.saveAndFlush(new Tenant("Company A", Instant.parse("2026-11-20T00:00:00Z")));
+        access = new TenantAccess(tenant.getId(), TenantRole.ADMIN);
+    }
+
+    @AfterEach
+    void cleanIsolatedTenants() {
+        // Committed endpoint tests delete their endpoints before removing the parent tenant.
+        tenants.deleteAllInBatch();
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "https://user:password@example.com/webhook",
@@ -55,7 +78,7 @@ class WebhookEndpointServiceIntegrationTests {
     void rejectedUrlDoesNotCreateEndpoint(String url) {
         long countBefore = repository.count();
 
-        assertThrows(InvalidWebhookUrlException.class, () -> service.create("Orders", url));
+        assertThrows(InvalidWebhookUrlException.class, () -> service.create(access, "Orders", url));
 
         assertEquals(countBefore, repository.count());
         verifyNoInteractions(resolver);
@@ -69,7 +92,7 @@ class WebhookEndpointServiceIntegrationTests {
         long countBefore = repository.count();
 
         InvalidWebhookUrlException error = assertThrows(InvalidWebhookUrlException.class,
-                () -> service.create("Orders", "https://example.com/webhooks"));
+                () -> service.create(access, "Orders", "https://example.com/webhooks"));
 
         assertEquals("Webhook host resolves to a blocked address", error.getMessage());
         assertEquals(countBefore, repository.count());
@@ -81,13 +104,14 @@ class WebhookEndpointServiceIntegrationTests {
         when(resolver.resolve("example.com")).thenReturn(new InetAddress[] {
                 InetAddress.getByName("8.8.8.8")
         });
-        WebhookEndpoint created = service.create("Orders", "https://example.com/webhooks");
+        WebhookEndpoint created = service.create(access, "Orders", "https://example.com/webhooks");
 
         try {
             WebhookEndpoint reloaded = repository.findById(created.getId()).orElseThrow();
             assertEquals(44, reloaded.getSigningSecret().length());
             assertEquals(32, Base64.getDecoder().decode(reloaded.getSigningSecret()).length);
             assertEquals(created.getSigningSecret(), reloaded.getSigningSecret());
+            assertEquals(access.tenantId(), reloaded.getTenant().getId());
         } finally {
             repository.deleteById(created.getId());
         }
@@ -98,14 +122,14 @@ class WebhookEndpointServiceIntegrationTests {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void changeEnabledCommitsStateThroughDirtyChecking(boolean enabled) {
         Instant createdAt = Instant.parse("2026-10-28T00:00:00Z");
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(tenants.getReferenceById(access.tenantId()),
                 "Orders", "https://example.com/webhooks", createdAt, TEST_SIGNING_SECRET);
         endpoint.changeEnabled(!enabled, createdAt);
         UUID id = repository.saveAndFlush(endpoint).getId();
 
         try {
             // No test transaction: the service must open and commit its own transaction.
-            WebhookEndpoint result = service.changeEnabled(id, enabled).orElseThrow();
+            WebhookEndpoint result = service.changeEnabled(access, id, enabled).orElseThrow();
             assertEquals(enabled, result.isEnabled());
 
             // This lookup runs after the service transaction has committed.
@@ -116,7 +140,7 @@ class WebhookEndpointServiceIntegrationTests {
             assertNotEquals(createdAt, reloaded.getUpdatedAt());
 
             Instant previousUpdatedAt = reloaded.getUpdatedAt();
-            service.changeEnabled(id, enabled).orElseThrow();
+            service.changeEnabled(access, id, enabled).orElseThrow();
             WebhookEndpoint unchanged = repository.findById(id).orElseThrow();
             assertEquals(enabled, unchanged.isEnabled());
             assertEquals(previousUpdatedAt, unchanged.getUpdatedAt());

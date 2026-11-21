@@ -1,5 +1,7 @@
 package com.wenghong.notifyflow.delivery.domain;
 
+import com.wenghong.notifyflow.identity.domain.Tenant;
+
 import java.time.Instant;
 
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
@@ -14,6 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class DeliveryAttemptTests {
+
+    private final Tenant fixtureTenant = new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z"));
 
     private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
@@ -152,10 +156,10 @@ class DeliveryAttemptTests {
     }
 
     private Delivery newDelivery() {
-        Event event = new Event(
+        Event event = new Event(fixtureTenant,
                 "order.confirmed", JsonMapper.builder().build().readTree("{\"orderNumber\":\"128\"}"),
                 "order-128-confirmed", STARTED_AT);
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Warehouse", "https://example.com/webhooks", STARTED_AT, TEST_SIGNING_SECRET);
         return new Delivery(event, endpoint, STARTED_AT);
     }

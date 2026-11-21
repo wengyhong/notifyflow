@@ -11,6 +11,7 @@ import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.domain.DeliveryStatus;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryAttemptRepository;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
+import com.wenghong.notifyflow.identity.application.TenantAccess;
 
 @Service
 public class DeliveryReplayService {
@@ -27,9 +28,10 @@ public class DeliveryReplayService {
     }
 
 
-    public Optional<Delivery> replay(UUID replay)
+    public Optional<Delivery> replay(TenantAccess access, UUID replay)
     {
-        return transactions.execute(status -> deliveries.findByIdForUpdate(replay).map(delivery->{
+        access.requireAdmin();
+        return transactions.execute(status -> deliveries.findByIdAndTenantIdForUpdate(replay,access.tenantId()).map(delivery->{
 
             if(delivery.getStatus() != DeliveryStatus.FAILED)
                 throw new DeliveryReplayNotAllowedException();

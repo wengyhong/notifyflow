@@ -28,6 +28,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Testcontainers
 class RedisWebhookEndpointCacheIntegrationTests {
 
+    private static final UUID TENANT_ID = UUID.fromString("e8d0c4f9-28df-4070-a6a4-052a05c68236");
+
     @Container
     private static final GenericContainer<?> REDIS = new GenericContainer<>(
             DockerImageName.parse("redis:8.2.11-alpine")).withExposedPorts(6379);
@@ -73,7 +75,8 @@ class RedisWebhookEndpointCacheIntegrationTests {
         assertEquals(snapshot, cache.findById(snapshot.id()).orElseThrow());
         String raw = redis.opsForValue().get(key(snapshot.id()));
         assertNotNull(raw);
-        assertEquals(6, json.readTree(raw).size());
+        assertEquals(7, json.readTree(raw).size());
+        assertEquals(TENANT_ID.toString(), json.readTree(raw).get("tenantId").asString());
         Long ttl = redis.getExpire(key(snapshot.id()), TimeUnit.MILLISECONDS);
         assertNotNull(ttl);
         assertTrue(ttl > 0 && ttl <= 60_000);
@@ -143,7 +146,7 @@ class RedisWebhookEndpointCacheIntegrationTests {
 
     private WebhookEndpointSnapshot snapshot(UUID id, boolean enabled) {
         Instant created = Instant.parse("2026-11-18T00:00:00.123456Z");
-        return new WebhookEndpointSnapshot(id, "Warehouse 東京", "https://example.com/webhook",
+        return new WebhookEndpointSnapshot(id, TENANT_ID, "Warehouse 東京", "https://example.com/webhook",
                 enabled, created, created.plusSeconds(10));
     }
 

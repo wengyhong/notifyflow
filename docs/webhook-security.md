@@ -23,6 +23,11 @@ same text for signing and sending.
 
 ## Receiver verification
 
+The receiver walkthrough was first recorded before account authentication was
+added. For current API calls, prepare a session, CSRF token, and tenant header
+using [authentication](authentication.md#local-verification-with-powershell).
+Use the producer route and Bearer key when submitting events as an application.
+
 The demo receiver:
 
 1. Rejects missing or malformed signing headers.
@@ -254,9 +259,11 @@ This implementation supports planned rotation. A compromised old secret
 remains capable of forging signatures accepted by receivers still trusting
 it. Immediate emergency revocation is not implemented; it would need a
 separate mechanism and coordination with receivers, including in-flight
-work. The management APIs currently share the project's existing
-unauthenticated development setup; authentication and tenant isolation
-are planned in Milestone 8. Secrets are stored as database values without
+work. The receiver examples were recorded before the authentication milestone.
+Current management requests require a user session, valid CSRF token, and
+`X-Tenant-ID` with administrator membership; producer keys only publish events.
+See [authentication](authentication.md) for the current API workflow.
+Secrets are stored as database values without
 application-level encryption in the current implementation.
 
 ## Destination address policy

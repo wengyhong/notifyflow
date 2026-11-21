@@ -29,6 +29,8 @@ import com.wenghong.notifyflow.event.persistence.EventRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.wenghong.notifyflow.identity.domain.Tenant;
+import com.wenghong.notifyflow.identity.persistence.TenantRepository;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -75,6 +77,14 @@ import static org.mockito.Mockito.when;
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
 class DeliveryProcessingServiceIntegrationTests {
 
+    @Autowired private TenantRepository tenants;
+    private Tenant tenant;
+
+    @BeforeEach
+    void createFixtureTenant() {
+        tenant = tenants.saveAndFlush(new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z")));
+    }
+
     private static final Instant NOW = Instant.parse("2026-11-02T00:00:00Z");
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final String SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -119,6 +129,7 @@ class DeliveryProcessingServiceIntegrationTests {
         deliveries.deleteAllInBatch();
         events.deleteAllInBatch();
         endpoints.deleteAllInBatch();
+        tenants.deleteAllInBatch();
     }
 
     @ParameterizedTest
@@ -461,9 +472,9 @@ class DeliveryProcessingServiceIntegrationTests {
         JsonNode payload = JSON.readTree("""
                 {"orderNumber":"128","items":[{"sku":"A","quantity":2}]}
                 """);
-        Event event = events.saveAndFlush(new Event(
+        Event event = events.saveAndFlush(new Event(tenant,
                 "order.confirmed", payload, "claim-request", NOW));
-        WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(
+        WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(tenant,
                 "Warehouse", "https://example.com/webhooks", NOW, SIGNING_SECRET));
         UUID deliveryId = deliveries.saveAndFlush(new Delivery(event, endpoint, NOW)).getId();
 
@@ -496,9 +507,9 @@ class DeliveryProcessingServiceIntegrationTests {
     void claimCopiesBothSecretsAndExpiryWithoutDecidingSendTimeValidity(long secondsUntilExpiry) {
         String nextSecret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         Instant expiry = NOW.plusSeconds(secondsUntilExpiry);
-        Event event = events.saveAndFlush(new Event(
+        Event event = events.saveAndFlush(new Event(tenant,
                 "order.confirmed", JSON.readTree("{\"orderNumber\":\"128\"}"), "rotation-claim", NOW));
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(tenant,
                 "Warehouse", "https://example.com/webhooks", NOW.minusSeconds(10000), SIGNING_SECRET);
         endpoint.rotateSigningSecret(nextSecret, NOW.minusSeconds(7200), expiry);
         endpoint = endpoints.saveAndFlush(endpoint);
@@ -814,9 +825,9 @@ class DeliveryProcessingServiceIntegrationTests {
     }
 
     private Delivery savePendingDelivery() {
-        Event event = events.saveAndFlush(new Event(
+        Event event = events.saveAndFlush(new Event(tenant,
                 "order.confirmed", JSON.readTree("{\"orderNumber\":\"128\"}"), "claim-request", NOW));
-        WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(
+        WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(tenant,
                 "Warehouse", "https://example.com/webhooks", NOW, SIGNING_SECRET));
         return deliveries.saveAndFlush(new Delivery(event, endpoint, NOW));
     }

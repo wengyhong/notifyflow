@@ -1,9 +1,13 @@
 package com.wenghong.notifyflow.endpoint.application;
 
+import com.wenghong.notifyflow.identity.domain.Tenant;
+
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.wenghong.notifyflow.identity.application.TenantAccess;
+import com.wenghong.notifyflow.identity.domain.TenantRole;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
 import com.wenghong.notifyflow.endpoint.domain.WebhookSubscription;
 import com.wenghong.notifyflow.endpoint.persistence.WebhookEndpointRepository;
@@ -28,7 +32,23 @@ import static org.mockito.Mockito.when;
 
 class WebhookSubscriptionServiceTests {
 
+    private final Tenant fixtureTenant = new Tenant("Fixture workspace", Instant.parse("2026-11-20T00:00:00Z"));
+
+    private static final UUID TENANT_ID = UUID.randomUUID();
+    private static final TenantAccess ACCESS = new TenantAccess(TENANT_ID, TenantRole.ADMIN);
     private static final String TEST_SIGNING_SECRET = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    @Test
+    void viewerIsDeniedBeforeEndpointLookupOrSubscriptionWrite() {
+        var endpoints = mock(WebhookEndpointRepository.class);
+        var subscriptions = mock(WebhookSubscriptionRepository.class);
+        var service = new WebhookSubscriptionService(endpoints, subscriptions);
+
+        assertThrows(org.springframework.security.access.AccessDeniedException.class,
+                () -> service.create(new TenantAccess(TENANT_ID, TenantRole.VIEWER),
+                        UUID.randomUUID(), "order.confirmed"));
+        verifyNoInteractions(endpoints, subscriptions);
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -37,7 +57,7 @@ class WebhookSubscriptionServiceTests {
         WebhookSubscriptionRepository subscriptions = mock(WebhookSubscriptionRepository.class);
         WebhookSubscriptionService service = new WebhookSubscriptionService(endpoints, subscriptions);
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Warehouse", "https://example.com/webhooks",
                 Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         ConstraintViolationException violation = mock(ConstraintViolationException.class);
@@ -46,16 +66,16 @@ class WebhookSubscriptionServiceTests {
         Throwable cause = nested ? new IllegalStateException("Persistence wrapper", violation) : violation;
         DataIntegrityViolationException failure =
                 new DataIntegrityViolationException("Constraint violation", cause);
-        when(endpoints.findById(endpointId)).thenReturn(Optional.of(endpoint));
+        when(endpoints.findByIdAndTenant_Id(endpointId, TENANT_ID)).thenReturn(Optional.of(endpoint));
         when(subscriptions.saveAndFlush(any(WebhookSubscription.class))).thenThrow(failure);
 
         DuplicateWebhookSubscriptionException thrown = assertThrows(
                 DuplicateWebhookSubscriptionException.class,
-                () -> service.create(endpointId, "order.confirmed"));
+                () -> service.create(ACCESS, endpointId, "order.confirmed"));
 
         assertEquals("The endpoint is already subscribed to this event type.", thrown.getMessage());
         assertSame(failure, thrown.getCause());
-        verify(endpoints).findById(endpointId);
+        verify(endpoints).findByIdAndTenant_Id(endpointId, TENANT_ID);
         verify(subscriptions).saveAndFlush(any(WebhookSubscription.class));
     }
 
@@ -71,22 +91,22 @@ class WebhookSubscriptionServiceTests {
         WebhookSubscriptionRepository subscriptions = mock(WebhookSubscriptionRepository.class);
         WebhookSubscriptionService service = new WebhookSubscriptionService(endpoints, subscriptions);
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Warehouse", "https://example.com/webhooks",
                 Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         ConstraintViolationException violation = mock(ConstraintViolationException.class);
         when(violation.getConstraintName()).thenReturn(constraintName);
         DataIntegrityViolationException failure =
                 new DataIntegrityViolationException("Constraint violation", violation);
-        when(endpoints.findById(endpointId)).thenReturn(Optional.of(endpoint));
+        when(endpoints.findByIdAndTenant_Id(endpointId, TENANT_ID)).thenReturn(Optional.of(endpoint));
         when(subscriptions.saveAndFlush(any(WebhookSubscription.class))).thenThrow(failure);
 
         DataIntegrityViolationException thrown = assertThrows(
                 DataIntegrityViolationException.class,
-                () -> service.create(endpointId, "order.confirmed"));
+                () -> service.create(ACCESS, endpointId, "order.confirmed"));
 
         assertSame(failure, thrown);
-        verify(endpoints).findById(endpointId);
+        verify(endpoints).findByIdAndTenant_Id(endpointId, TENANT_ID);
         verify(subscriptions).saveAndFlush(any(WebhookSubscription.class));
     }
 
@@ -96,18 +116,18 @@ class WebhookSubscriptionServiceTests {
         WebhookSubscriptionRepository subscriptions = mock(WebhookSubscriptionRepository.class);
         WebhookSubscriptionService service = new WebhookSubscriptionService(endpoints, subscriptions);
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Warehouse", "https://example.com/webhooks",
                 Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         WebhookSubscription savedSubscription = new WebhookSubscription(endpoint, "order.confirmed");
-        when(endpoints.findById(endpointId)).thenReturn(Optional.of(endpoint));
+        when(endpoints.findByIdAndTenant_Id(endpointId, TENANT_ID)).thenReturn(Optional.of(endpoint));
         when(subscriptions.saveAndFlush(any(WebhookSubscription.class)))
                 .thenReturn(savedSubscription);
 
-        Optional<WebhookSubscription> result = service.create(endpointId, "order.confirmed");
+        Optional<WebhookSubscription> result = service.create(ACCESS, endpointId, "order.confirmed");
 
         assertSame(savedSubscription, result.orElseThrow());
-        verify(endpoints).findById(endpointId);
+        verify(endpoints).findByIdAndTenant_Id(endpointId, TENANT_ID);
         ArgumentCaptor<WebhookSubscription> captor =
                 ArgumentCaptor.forClass(WebhookSubscription.class);
         verify(subscriptions).saveAndFlush(captor.capture());
@@ -122,20 +142,20 @@ class WebhookSubscriptionServiceTests {
         WebhookSubscriptionRepository subscriptions = mock(WebhookSubscriptionRepository.class);
         WebhookSubscriptionService service = new WebhookSubscriptionService(endpoints, subscriptions);
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        WebhookEndpoint endpoint = new WebhookEndpoint(
+        WebhookEndpoint endpoint = new WebhookEndpoint(fixtureTenant,
                 "Warehouse", "https://example.com/webhooks",
                 Instant.parse("2026-10-29T00:00:00Z"), TEST_SIGNING_SECRET);
         DataIntegrityViolationException failure =
                 new DataIntegrityViolationException("Duplicate subscription");
-        when(endpoints.findById(endpointId)).thenReturn(Optional.of(endpoint));
+        when(endpoints.findByIdAndTenant_Id(endpointId, TENANT_ID)).thenReturn(Optional.of(endpoint));
         when(subscriptions.saveAndFlush(any(WebhookSubscription.class))).thenThrow(failure);
 
         DataIntegrityViolationException thrown = assertThrows(
                 DataIntegrityViolationException.class,
-                () -> service.create(endpointId, "order.confirmed"));
+                () -> service.create(ACCESS, endpointId, "order.confirmed"));
 
         assertSame(failure, thrown);
-        verify(endpoints).findById(endpointId);
+        verify(endpoints).findByIdAndTenant_Id(endpointId, TENANT_ID);
         verify(subscriptions).saveAndFlush(any(WebhookSubscription.class));
     }
 
@@ -145,12 +165,12 @@ class WebhookSubscriptionServiceTests {
         WebhookSubscriptionRepository subscriptions = mock(WebhookSubscriptionRepository.class);
         WebhookSubscriptionService service = new WebhookSubscriptionService(endpoints, subscriptions);
         UUID endpointId = UUID.fromString("a8a1d32a-a014-47bb-bf82-f31ea55e4acd");
-        when(endpoints.findById(endpointId)).thenReturn(Optional.empty());
+        when(endpoints.findByIdAndTenant_Id(endpointId, TENANT_ID)).thenReturn(Optional.empty());
 
-        var result = service.create(endpointId, "order.confirmed");
+        var result = service.create(ACCESS, endpointId, "order.confirmed");
 
         assertTrue(result.isEmpty());
-        verify(endpoints).findById(endpointId);
+        verify(endpoints).findByIdAndTenant_Id(endpointId, TENANT_ID);
         verifyNoInteractions(subscriptions);
     }
 }

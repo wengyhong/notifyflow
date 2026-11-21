@@ -30,6 +30,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Testcontainers
 class RedisEventIdempotencyCacheIntegrationTests {
 
+    private static final UUID TENANT_ID = UUID.randomUUID();
+
     @Container
     private static final GenericContainer<?> REDIS = new GenericContainer<>(
             DockerImageName.parse("redis:8.2.11-alpine")).withExposedPorts(6379);
@@ -70,9 +72,9 @@ class RedisEventIdempotencyCacheIntegrationTests {
     void snapshotRoundTripsWithTwentyFourHourExpiry(String key) {
         EventSnapshot snapshot = snapshot();
 
-        cache.put(key, snapshot);
+        cache.put(TENANT_ID, key, snapshot);
 
-        assertEquals(snapshot, cache.findByKey(key).orElseThrow());
+        assertEquals(snapshot, cache.findByKey(TENANT_ID, key).orElseThrow());
         Long ttl = redis.getExpire(redisKey(key), TimeUnit.MILLISECONDS);
         assertNotNull(ttl);
         assertTrue(ttl > 0 && ttl <= Duration.ofHours(24).toMillis());
@@ -82,21 +84,21 @@ class RedisEventIdempotencyCacheIntegrationTests {
     void differentKeysHaveIndependentSnapshotsAndMissingKeyIsMiss() {
         EventSnapshot first = snapshot();
         EventSnapshot second = snapshot();
-        cache.put("request-1", first);
-        cache.put("request-2", second);
+        cache.put(TENANT_ID, "request-1", first);
+        cache.put(TENANT_ID, "request-2", second);
 
-        assertEquals(first, cache.findByKey("request-1").orElseThrow());
-        assertEquals(second, cache.findByKey("request-2").orElseThrow());
-        assertTrue(cache.findByKey("missing").isEmpty());
+        assertEquals(first, cache.findByKey(TENANT_ID, "request-1").orElseThrow());
+        assertEquals(second, cache.findByKey(TENANT_ID, "request-2").orElseThrow());
+        assertTrue(cache.findByKey(TENANT_ID, "missing").isEmpty());
     }
 
     @Test
     void readsDoNotExtendExpiry() {
-        cache.put("request-1", snapshot());
+        cache.put(TENANT_ID, "request-1", snapshot());
         assertTrue(Boolean.TRUE.equals(redis.expire(redisKey("request-1"), Duration.ofSeconds(5))));
         long before = redis.getExpire(redisKey("request-1"), TimeUnit.MILLISECONDS);
 
-        assertTrue(cache.findByKey("request-1").isPresent());
+        assertTrue(cache.findByKey(TENANT_ID, "request-1").isPresent());
 
         long after = redis.getExpire(redisKey("request-1"), TimeUnit.MILLISECONDS);
         assertTrue(after > 0 && after <= before);
@@ -104,32 +106,32 @@ class RedisEventIdempotencyCacheIntegrationTests {
 
     @Test
     void expiredSnapshotBecomesCacheMiss() {
-        cache.put("request-1", snapshot());
+        cache.put(TENANT_ID, "request-1", snapshot());
         // Check the configured TTL above, then shorten this entry to avoid a 24-hour wait.
         assertTrue(Boolean.TRUE.equals(redis.expire(redisKey("request-1"), Duration.ofMillis(150))));
 
         await().atMost(Duration.ofSeconds(5))
                 .until(() -> !Boolean.TRUE.equals(redis.hasKey(redisKey("request-1"))));
 
-        assertTrue(cache.findByKey("request-1").isEmpty());
+        assertTrue(cache.findByKey(TENANT_ID, "request-1").isEmpty());
     }
 
     @Test
     void malformedJsonIsMissAndCanBeReplacedByValidSnapshot() {
         redis.opsForValue().set(redisKey("request-1"), "{bad-json", Duration.ofSeconds(60));
-        assertTrue(cache.findByKey("request-1").isEmpty());
+        assertTrue(cache.findByKey(TENANT_ID, "request-1").isEmpty());
         EventSnapshot snapshot = snapshot();
 
-        cache.put("request-1", snapshot);
+        cache.put(TENANT_ID, "request-1", snapshot);
 
-        assertEquals(snapshot, cache.findByKey("request-1").orElseThrow());
+        assertEquals(snapshot, cache.findByKey(TENANT_ID, "request-1").orElseThrow());
     }
 
     @Test
     void redisWrongTypeErrorIsCacheMiss() {
         redis.opsForList().rightPush(redisKey("request-1"), "unexpected-list");
 
-        assertTrue(cache.findByKey("request-1").isEmpty());
+        assertTrue(cache.findByKey(TENANT_ID, "request-1").isEmpty());
     }
 
     private EventSnapshot snapshot() {
@@ -138,7 +140,30 @@ class RedisEventIdempotencyCacheIntegrationTests {
                 Instant.parse("2026-11-18T00:00:00.123456Z"));
     }
 
+    @Test
+    void sameKeyAcrossTenantsHasIndependentSnapshotsAndExpiry() {
+        UUID other = UUID.randomUUID();
+        EventSnapshot first = snapshot();
+        EventSnapshot second = snapshot();
+        cache.put(TENANT_ID, "same-key", first);
+        assertTrue(cache.findByKey(other, "same-key").isEmpty());
+        cache.put(other, "same-key", second);
+
+        assertEquals(first, cache.findByKey(TENANT_ID, "same-key").orElseThrow());
+        assertEquals(second, cache.findByKey(other, "same-key").orElseThrow());
+        assertTrue(Boolean.TRUE.equals(redis.expire(redisKey("same-key"), Duration.ofMillis(150))));
+        await().atMost(Duration.ofSeconds(5)).until(() -> cache.findByKey(TENANT_ID, "same-key").isEmpty());
+        assertEquals(second, cache.findByKey(other, "same-key").orElseThrow());
+    }
+
+    @Test
+    void legacyUnscopedCacheEntryIsNotReadByTenantLookup() {
+        redis.opsForValue().set("notifyflow:event:idempotency:legacy-key",
+                json.writeValueAsString(snapshot()), Duration.ofHours(24));
+        assertTrue(cache.findByKey(TENANT_ID, "legacy-key").isEmpty());
+    }
+
     private String redisKey(String key) {
-        return "notifyflow:event:idempotency:" + key;
+        return "notifyflow:event:idempotency:" + TENANT_ID + ":" + key;
     }
 }

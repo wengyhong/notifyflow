@@ -1,10 +1,11 @@
 package com.wenghong.notifyflow.event.application;
 
 import java.util.Optional;
+import java.util.UUID;
 
 public interface EventIdempotencyCache {
 
-    Optional<EventSnapshot> findByKey(String idempotencyKey);
+    Optional<EventSnapshot> findByKey(UUID tenantId, String idempotencyKey);
 
-    void put(String idempotencyKey, EventSnapshot snapshot);
+    void put(UUID tenantId,String idempotencyKey, EventSnapshot snapshot);
 }
