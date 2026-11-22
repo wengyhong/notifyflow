@@ -57,6 +57,32 @@ class WebhookSubscriptionRepositoryTests {
     private JdbcTemplate jdbcTemplate;
 
     @Test
+    void listingIsOrderedAndScopedToBothEndpointAndTenantIncludingDisabledEndpoints() {
+        WebhookEndpoint endpoint = saveEndpoint("Selected");
+        endpoint.changeEnabled(false, Instant.parse("2026-11-20T00:01:00Z"));
+        WebhookEndpoint anotherEndpoint = saveEndpoint("Another");
+        Tenant other = tenants.saveAndFlush(new Tenant("Other workspace", Instant.parse("2026-11-20T00:00:00Z")));
+        WebhookEndpoint foreign = endpoints.saveAndFlush(new WebhookEndpoint(other,
+                "Foreign", "https://example.com/foreign", Instant.parse("2026-11-20T00:00:00Z"), TEST_SIGNING_SECRET));
+        WebhookSubscription z = new WebhookSubscription(endpoint, "z.created");
+        WebhookSubscription a = new WebhookSubscription(endpoint, "a.created");
+        subscriptions.saveAllAndFlush(List.of(z, a,
+                new WebhookSubscription(anotherEndpoint, "other.created"),
+                new WebhookSubscription(foreign, "foreign.created")));
+        entityManager.clear();
+
+        var result = subscriptions.findAllByEndpoint_IdAndEndpoint_Tenant_IdOrderByEventTypeAscIdAsc(
+                endpoint.getId(), tenant.getId());
+        assertEquals(List.of(a.getId(), z.getId()), result.stream().map(WebhookSubscription::getId).toList());
+        assertEquals(List.of(), subscriptions.findAllByEndpoint_IdAndEndpoint_Tenant_IdOrderByEventTypeAscIdAsc(
+                endpoint.getId(), other.getId()));
+        assertEquals(List.of(), subscriptions.findAllByEndpoint_IdAndEndpoint_Tenant_IdOrderByEventTypeAscIdAsc(
+                foreign.getId(), tenant.getId()));
+        assertEquals(List.of(), subscriptions.findAllByEndpoint_IdAndEndpoint_Tenant_IdOrderByEventTypeAscIdAsc(
+                UUID.randomUUID(), tenant.getId()));
+    }
+
+    @Test
     void matchingQueryReturnsOnlySelectedTenantsRequestedEventTypeWithEnabledEndpoint() {
         WebhookEndpoint warehouse = saveEndpoint("Warehouse");
         WebhookEndpoint email = saveEndpoint("Email");

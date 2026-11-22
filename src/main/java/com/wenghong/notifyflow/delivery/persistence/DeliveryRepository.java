@@ -6,6 +6,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Page;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -17,6 +18,25 @@ import com.wenghong.notifyflow.delivery.domain.DeliveryStatus;
 import jakarta.persistence.LockModeType;
 
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
+
+        @Query("""
+                        select d from Delivery d
+                        where d.event.tenant.id = :tenantId
+                          and d.endpoint.tenant.id = :tenantId
+                          and (:status is null or d.status = :status)
+                        """)
+        Page<Delivery> findHistoryByTenantId(
+                        @Param("tenantId") UUID tenantId,
+                        @Param("status") DeliveryStatus status,
+                        Pageable pageable);
+
+        @Query("""
+                        select d from Delivery d
+                        where d.id = :id
+                          and d.event.tenant.id = :tenantId
+                          and d.endpoint.tenant.id = :tenantId
+                        """)
+        Optional<Delivery> findByIdAndTenantId(@Param("id") UUID id, @Param("tenantId") UUID tenantId);
 
         @Lock(LockModeType.PESSIMISTIC_WRITE)
         @Query("select d from Delivery d where d.id = :id")

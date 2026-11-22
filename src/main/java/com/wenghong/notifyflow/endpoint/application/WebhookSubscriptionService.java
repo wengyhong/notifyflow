@@ -1,6 +1,7 @@
 package com.wenghong.notifyflow.endpoint.application;
 
 import java.util.Optional;
+import java.util.List;
 import java.util.UUID;
 
 import org.springframework.dao.DataIntegrityViolationException;
@@ -46,6 +47,14 @@ public class WebhookSubscriptionService {
             }
         });
 
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<List<WebhookSubscription>> findAll(TenantAccess access, UUID endpointId) {
+        return endpoints.findByIdAndTenant_Id(endpointId, access.tenantId())
+                .map(endpoint -> subscriptions
+                        .findAllByEndpoint_IdAndEndpoint_Tenant_IdOrderByEventTypeAscIdAsc(
+                                endpointId, access.tenantId()));
     }
 
     private boolean isDuplicateSubscription(Throwable error) {

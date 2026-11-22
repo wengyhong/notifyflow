@@ -5,6 +5,8 @@ import java.time.Instant;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.wenghong.notifyflow.identity.domain.ApiKey;
@@ -43,6 +45,12 @@ public class ApiKeyService {
         ApiKey key = keys.save(new ApiKey(tenant, name, hash, now));
 
         return new ApiKeyCreationResult(key.getId(), key.getName(), rawKey, key.getCreatedAt());
+    }
+
+    @Transactional(readOnly = true)
+    public Page<ApiKey> findAll(TenantAccess access, Pageable pageable) {
+        access.requireAdmin();
+        return keys.findAllByTenant_Id(access.tenantId(), pageable);
     }
 
     @Transactional

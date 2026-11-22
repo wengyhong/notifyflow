@@ -17,6 +17,7 @@ import com.wenghong.notifyflow.endpoint.persistence.WebhookSubscriptionRepositor
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
@@ -52,6 +53,29 @@ class WebhookSubscriptionServiceIntegrationTests {
     private WebhookSubscriptionService service;
 
     @Autowired private TenantRepository tenants;
+
+    @ParameterizedTest
+    @EnumSource(TenantRole.class)
+    void listingAllowsBothRolesAndDistinguishesEmptyOwnedEndpointsFromForeignOrMissing(TenantRole role) {
+        Instant now = Instant.parse("2026-11-20T00:00:00Z");
+        Tenant owner = tenants.saveAndFlush(new Tenant("Owner", now));
+        Tenant other = tenants.saveAndFlush(new Tenant("Other", now));
+        WebhookEndpoint endpoint = endpoints.saveAndFlush(new WebhookEndpoint(owner,
+                "Selected", "https://example.com/selected", now, TEST_SIGNING_SECRET));
+        WebhookEndpoint empty = endpoints.saveAndFlush(new WebhookEndpoint(owner,
+                "Empty", "https://example.com/empty", now, TEST_SIGNING_SECRET));
+        WebhookEndpoint foreign = endpoints.saveAndFlush(new WebhookEndpoint(other,
+                "Foreign", "https://example.com/foreign", now, TEST_SIGNING_SECRET));
+        WebhookSubscription own = subscriptions.saveAndFlush(new WebhookSubscription(endpoint, "order.created"));
+        subscriptions.saveAndFlush(new WebhookSubscription(foreign, "foreign.created"));
+        TenantAccess access = new TenantAccess(owner.getId(), role);
+
+        assertEquals(List.of(own.getId()), service.findAll(access, endpoint.getId()).orElseThrow()
+                .stream().map(WebhookSubscription::getId).toList());
+        assertEquals(List.of(), service.findAll(access, empty.getId()).orElseThrow());
+        assertTrue(service.findAll(access, foreign.getId()).isEmpty());
+        assertTrue(service.findAll(access, UUID.randomUUID()).isEmpty());
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})

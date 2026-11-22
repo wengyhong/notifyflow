@@ -15,6 +15,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -44,6 +46,23 @@ class ApiKeyServiceTests {
     private final ApiKeyHasher hasher = mock(ApiKeyHasher.class);
     private final Clock clock = mock(Clock.class);
     private final ApiKeyService service = new ApiKeyService(keys, tenants, generator, hasher, clock);
+
+    @Test
+    void listUsesVerifiedTenantAndProvidedPageWithoutGeneratingOrHashing() {
+        var pageable = PageRequest.of(1, 20);
+        Page<ApiKey> expected = Page.empty(pageable);
+        when(keys.findAllByTenant_Id(TENANT_ID, pageable)).thenReturn(expected);
+        assertSame(expected, service.findAll(ADMIN, pageable));
+        verify(keys).findAllByTenant_Id(TENANT_ID, pageable);
+        verifyNoInteractions(tenants, generator, hasher, clock);
+    }
+
+    @Test
+    void viewerCannotListKeysBeforeAnyRepositoryAccess() {
+        assertThrows(AccessDeniedException.class, () -> service.findAll(
+                new TenantAccess(TENANT_ID, TenantRole.VIEWER), PageRequest.of(0, 20)));
+        verifyNoInteractions(keys, tenants, generator, hasher, clock);
+    }
 
     @Test
     void administratorStoresHashForVerifiedTenantAndReceivesRawKeyAndSavedMetadata() {

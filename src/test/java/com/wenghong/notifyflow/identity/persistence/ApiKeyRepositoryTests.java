@@ -4,6 +4,8 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.List;
+import java.util.Comparator;
 
 import com.wenghong.notifyflow.endpoint.persistence.PostgresTestConfiguration;
 import com.wenghong.notifyflow.identity.domain.ApiKey;
@@ -21,6 +23,8 @@ import org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +47,34 @@ class ApiKeyRepositoryTests {
     @Autowired private EntityManager entityManager;
     @Autowired private JdbcTemplate jdbc;
     private Tenant tenant;
+
+    @Test
+    void listingPaginatesOnlyOwnedKeysIncludingRevokedAndOrdersTimestampTiesById() {
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", CREATED));
+        ApiKey old = keys.saveAndFlush(new ApiKey(tenant, "Old", HASH, CREATED));
+        ApiKey first = keys.saveAndFlush(new ApiKey(tenant, "Recent active", "b".repeat(64), CREATED.plusSeconds(60)));
+        ApiKey second = new ApiKey(tenant, "Recent revoked", "c".repeat(64), CREATED.plusSeconds(60));
+        second.revoke(CREATED.plusSeconds(120));
+        second = keys.saveAndFlush(second);
+        ApiKey foreign = keys.saveAndFlush(new ApiKey(other, "Foreign", "d".repeat(64), CREATED.plusSeconds(180)));
+        entityManager.clear();
+        var sort = Sort.by(Sort.Direction.DESC, "createdAt", "id");
+        var expectedRecentIds = List.of(first, second).stream()
+                .sorted(Comparator.comparing((ApiKey key) -> key.getId().toString()).reversed())
+                .map(ApiKey::getId).toList();
+
+        var page0 = keys.findAllByTenant_Id(tenant.getId(), PageRequest.of(0, 2, sort));
+        var page1 = keys.findAllByTenant_Id(tenant.getId(), PageRequest.of(1, 2, sort));
+        assertEquals(expectedRecentIds, page0.getContent().stream().map(ApiKey::getId).toList());
+        assertEquals(List.of(old.getId()), page1.getContent().stream().map(ApiKey::getId).toList());
+        assertEquals(3, page0.getTotalElements());
+        assertEquals(2, page0.getTotalPages());
+        assertEquals(1, page0.getContent().stream().filter(key -> !key.isActive()).count());
+        assertEquals(0, keys.findAllByTenant_Id(tenant.getId(), PageRequest.of(9, 2, sort)).getNumberOfElements());
+        assertEquals(List.of(foreign.getId()), keys.findAllByTenant_Id(other.getId(), PageRequest.of(0, 2, sort))
+                .getContent().stream().map(ApiKey::getId).toList());
+        assertEquals(0, keys.findAllByTenant_Id(UUID.randomUUID(), PageRequest.of(0, 2, sort)).getTotalElements());
+    }
 
     @BeforeEach
     void createOwner() {

@@ -27,6 +27,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.security.access.AccessDeniedException;
@@ -60,6 +61,25 @@ class ApiKeyServiceIntegrationTests {
     @MockitoSpyBean private Clock clock;
     private Tenant tenant;
     private TenantAccess admin;
+
+    @Test
+    void listReturnsOnlyOwnedKeysAndReflectsCommittedRevocation() {
+        Tenant other = tenants.saveAndFlush(new Tenant("Company B", NOW));
+        ApiKeyCreationResult own = service.create(admin, "Own producer");
+        service.create(new TenantAccess(other.getId(), TenantRole.ADMIN), "Foreign producer");
+
+        var before = service.findAll(admin, PageRequest.of(0, 20));
+        assertEquals(1, before.getTotalElements());
+        assertEquals(own.id(), before.getContent().getFirst().getId());
+        assertTrue(before.getContent().getFirst().isActive());
+
+        service.revoke(admin, own.id());
+        var after = service.findAll(admin, PageRequest.of(0, 20));
+        assertEquals(1, after.getTotalElements());
+        assertEquals(NOW, after.getContent().getFirst().getRevokedAt());
+        assertThrows(AccessDeniedException.class, () -> service.findAll(
+                new TenantAccess(tenant.getId(), TenantRole.VIEWER), PageRequest.of(0, 20)));
+    }
 
     @BeforeEach
     void createTenant() {

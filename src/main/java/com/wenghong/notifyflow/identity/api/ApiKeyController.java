@@ -5,6 +5,9 @@ import java.util.UUID;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.web.PageableDefault;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -20,6 +23,7 @@ import jakarta.validation.Valid;
 
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 
 @RestController
 @RequestMapping("/api/key")
@@ -45,6 +49,20 @@ public class ApiKeyController {
         ApiKeyCreationResult result = service.create(tenant, body.name());
 
         return ResponseEntity.status(HttpStatus.CREATED).cacheControl(CacheControl.noStore()).body(toResponse(result));
+    }
+
+    @GetMapping
+    public ResponseEntity<ApiKeyPageResponse> findAll(
+            @AuthenticationPrincipal AppUserDetails user,
+            @RequestHeader("X-Tenant-ID") UUID tenantId,
+            @PageableDefault(size = 20, sort = {"createdAt", "id"}, direction = Sort.Direction.DESC)
+            Pageable pageable) {
+        var access = tenantAccessService.requireAccess(tenantId, user.getUserId());
+        var page = service.findAll(access, pageable).map(key -> new ApiKeyResponse(
+                key.getId(), key.getName(), key.getCreatedAt(), key.getRevokedAt()));
+
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(new ApiKeyPageResponse(
+                page.getContent(), page.getNumber(), page.getSize(), page.getTotalElements(), page.getTotalPages()));
     }
 
     @PostMapping("/{id}/revoke")

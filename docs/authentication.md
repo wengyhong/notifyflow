@@ -93,6 +93,7 @@ registration responses contain neither the password nor its hash.
 | Route | Request | Success | Notes |
 | --- | --- | --- | --- |
 | `GET /api/auth/csrf` | No authentication required | 200 with token metadata | Provides a CSRF token and creates a session when needed |
+| `GET /api/auth/me` | Authenticated user session; no tenant header or CSRF token required | 200 with user ID, email, and workspace memberships | Uses the session principal's user ID; returns no password data and uses `Cache-Control: no-store` |
 | `POST /api/auth/register` | JSON with valid CSRF token | 201 with new IDs | Anonymous registration is allowed |
 | `POST /api/auth/login` | Form fields `email` and `password`, with valid CSRF token | 204 | Saves authentication in the session |
 | `POST /api/auth/logout` | Session cookie and valid CSRF token | 204 | Invalidates the session and deletes `JSESSIONID` |
@@ -178,6 +179,7 @@ records redact the raw value from `toString()`.
 | Route | Authentication and input | Success |
 | --- | --- | --- |
 | `POST /api/key` | User session, CSRF token, `X-Tenant-ID`, JSON with a nonblank `name` of at most 100 characters | 201 with `id`, `name`, `rawKey`, `createdAt` |
+| `GET /api/key?page=0&size=20` | Administrator user session and `X-Tenant-ID`; no CSRF token required for GET | 200 with paginated metadata: `id`, `name`, `createdAt`, `revokedAt`; no raw key or hash |
 | `POST /api/key/{id}/revoke` | User session, CSRF token, `X-Tenant-ID`; no body required | 204 with an empty body |
 | `POST /api/producer/events` | `Authorization: Bearer <rawKey>`, `Idempotency-Key`, and event JSON | 202 with `id`, `type`, `createdAt` |
 

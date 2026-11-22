@@ -1,12 +1,15 @@
 package com.wenghong.notifyflow.endpoint.api;
 
 import java.util.UUID;
+import java.util.List;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.http.CacheControl;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -48,6 +51,19 @@ public class WebhookSubscriptionController {
 
         return service.create(access, id, request.eventType()).map(this::toResponse)
                 .map(response -> ResponseEntity.status(HttpStatus.CREATED).body(response))
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<List<WebhookSubscriptionResponse>> findAll(
+            @AuthenticationPrincipal AppUserDetails user,
+            @RequestHeader("X-Tenant-ID") UUID tenantId,
+            @PathVariable UUID id) {
+        TenantAccess access = tenantAccessService.requireAccess(tenantId, user.getUserId());
+
+        return service.findAll(access, id)
+                .map(subscriptions -> subscriptions.stream().map(this::toResponse).toList())
+                .map(response -> ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(response))
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
 

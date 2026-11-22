@@ -3,6 +3,7 @@ package com.wenghong.notifyflow.identity.api;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -30,6 +31,11 @@ import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
@@ -39,6 +45,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -188,11 +195,112 @@ class ApiKeyControllerTests {
     }
 
     @Test
-    void getCannotCreateOrRevealAKey() throws Exception {
-        mvc.perform(get(ROUTE).with(user(new AppUserDetails(account()))).header("X-Tenant-ID", TENANT_ID))
-                .andExpect(status().isMethodNotAllowed());
+    void listReturnsMetadataOnlyIncludingActiveAndRevokedKeysWithoutCsrf() throws Exception {
+        Tenant tenant = membership(TenantRole.ADMIN);
+        ApiKey active = new ApiKey(tenant, "Active producer", HASH, NOW);
+        ReflectionTestUtils.setField(active, "id", KEY_ID);
+        ApiKey revoked = new ApiKey(tenant, "Revoked producer", "c".repeat(64), NOW.minusSeconds(60));
+        UUID revokedId = UUID.randomUUID();
+        ReflectionTestUtils.setField(revoked, "id", revokedId);
+        revoked.revoke(NOW);
+        when(keys.findAllByTenant_Id(eq(TENANT_ID), any(Pageable.class)))
+                .thenAnswer(call -> new PageImpl<>(List.of(active, revoked), call.getArgument(1), 2));
+
+        mvc.perform(listRequest().header("X-Tenant-ID", TENANT_ID))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.content[0].*", hasSize(4)))
+                .andExpect(jsonPath("$.content[0].id").value(KEY_ID.toString()))
+                .andExpect(jsonPath("$.content[0].name").value("Active producer"))
+                .andExpect(jsonPath("$.content[0].createdAt").value(NOW.toString()))
+                .andExpect(jsonPath("$.content[0].revokedAt").isEmpty())
+                .andExpect(jsonPath("$.content[1].id").value(revokedId.toString()))
+                .andExpect(jsonPath("$.content[1].revokedAt").value(NOW.toString()))
+                .andExpect(jsonPath("$.content[0].rawKey").doesNotExist())
+                .andExpect(jsonPath("$.content[0].keyHash").doesNotExist())
+                .andExpect(jsonPath("$.content[0].tenant").doesNotExist())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.totalPages").value(1));
+
+        var pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(keys).findAllByTenant_Id(eq(TENANT_ID), pageable.capture());
+        assertEquals(PageRequest.of(0, 20, Sort.by(Sort.Direction.DESC, "createdAt", "id")), pageable.getValue());
+        verifyNoInteractions(tenants, generator, hasher, clock);
+    }
+
+    @Test
+    void listSupportsExplicitPaginationAndEmptyPage() throws Exception {
+        membership(TenantRole.ADMIN);
+        when(keys.findAllByTenant_Id(eq(TENANT_ID), any(Pageable.class)))
+                .thenAnswer(call -> new PageImpl<ApiKey>(List.of(), call.getArgument(1), 4));
+        mvc.perform(listRequest().header("X-Tenant-ID", TENANT_ID).param("page", "3").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", hasSize(0)))
+                .andExpect(jsonPath("$.page").value(3))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalElements").value(4))
+                .andExpect(jsonPath("$.totalPages").value(2));
+    }
+
+    @Test
+    void listReturnsEmptyPageForWorkspaceWithoutKeys() throws Exception {
+        membership(TenantRole.ADMIN);
+        when(keys.findAllByTenant_Id(eq(TENANT_ID), any(Pageable.class)))
+                .thenAnswer(call -> Page.empty(call.getArgument(1)));
+        mvc.perform(listRequest().header("X-Tenant-ID", TENANT_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", hasSize(0)))
+                .andExpect(jsonPath("$.totalElements").value(0))
+                .andExpect(jsonPath("$.totalPages").value(0));
+    }
+
+    @Test
+    void viewerCannotListKeysEvenWithForgedAdminHeader() throws Exception {
+        membership(TenantRole.VIEWER);
+        mvc.perform(listRequest().header("X-Tenant-ID", TENANT_ID).header("X-Tenant-Role", "ADMIN"))
+                .andExpect(status().isForbidden());
+        verifyNoCreationWork();
+    }
+
+    @Test
+    void listRejectsNonMemberBeforeKeyQuery() throws Exception {
+        mvc.perform(listRequest().header("X-Tenant-ID", TENANT_ID)).andExpect(status().isForbidden());
+        verify(memberships).findByTenant_IdAndUser_Id(TENANT_ID, USER_ID);
+        verifyNoCreationWork();
+    }
+
+    @Test
+    void listCannotBorrowMembershipFromAnotherTenant() throws Exception {
+        membership(TenantRole.ADMIN);
+        UUID otherTenant = UUID.randomUUID();
+        mvc.perform(listRequest().header("X-Tenant-ID", otherTenant)).andExpect(status().isForbidden());
+        verify(memberships).findByTenant_IdAndUser_Id(otherTenant, USER_ID);
+        verifyNoCreationWork();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "not-a-uuid"})
+    void listRejectsMissingOrMalformedTenantHeader(String value) throws Exception {
+        var request = listRequest();
+        if (!value.isEmpty()) request.header("X-Tenant-ID", value);
+        mvc.perform(request).andExpect(status().isBadRequest());
         verifyNoInteractions(memberships);
         verifyNoCreationWork();
+    }
+
+    @Test
+    void listRequiresAnAuthenticatedUser() throws Exception {
+        mvc.perform(listRequest().with(anonymous()).header("X-Tenant-ID", TENANT_ID))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(memberships);
+        verifyNoCreationWork();
+    }
+
+    private MockHttpServletRequestBuilder listRequest() {
+        return get(ROUTE).with(user(new AppUserDetails(account())));
     }
 
     @ParameterizedTest

@@ -1,6 +1,7 @@
 package com.wenghong.notifyflow.endpoint.api;
 
 import java.util.Optional;
+import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
@@ -39,6 +41,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -47,6 +50,83 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import(SecurityConfiguration.class)
 @WithMockUser(roles = {})
 class WebhookSubscriptionControllerTests {
+
+    @ParameterizedTest
+    @EnumSource(TenantRole.class)
+    void listAllowsBothRolesWithoutCsrfAndReturnsOnlyResponseFields(TenantRole role) throws Exception {
+        TenantAccess access = new TenantAccess(TENANT_ID, role);
+        when(tenantAccess.requireAccess(TENANT_ID, USER_ID)).thenReturn(access);
+        WebhookEndpoint endpoint = mock(WebhookEndpoint.class);
+        when(endpoint.getId()).thenReturn(ENDPOINT_ID);
+        WebhookSubscription subscription = mock(WebhookSubscription.class);
+        when(subscription.getId()).thenReturn(SUBSCRIPTION_ID);
+        when(subscription.getEndpoint()).thenReturn(endpoint);
+        when(subscription.getEventType()).thenReturn("order.created");
+        when(service.findAll(access, ENDPOINT_ID)).thenReturn(Optional.of(List.of(subscription)));
+
+        mockMvc.perform(listRequest(ENDPOINT_ID))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].length()").value(3))
+                .andExpect(jsonPath("$[0].id").value(SUBSCRIPTION_ID.toString()))
+                .andExpect(jsonPath("$[0].endpointId").value(ENDPOINT_ID.toString()))
+                .andExpect(jsonPath("$[0].eventType").value("order.created"));
+        verify(service).findAll(access, ENDPOINT_ID);
+    }
+
+    @Test
+    void listReturnsEmptyArrayForOwnedEndpointWithoutSubscriptions() throws Exception {
+        when(service.findAll(ACCESS, ENDPOINT_ID)).thenReturn(Optional.of(List.of()));
+        mockMvc.perform(listRequest(ENDPOINT_ID))
+                .andExpect(status().isOk()).andExpect(content().json("[]"));
+    }
+
+    @Test
+    void listReturnsNotFoundForMissingOrForeignEndpoint() throws Exception {
+        when(service.findAll(ACCESS, ENDPOINT_ID)).thenReturn(Optional.empty());
+        mockMvc.perform(listRequest(ENDPOINT_ID))
+                .andExpect(status().isNotFound()).andExpect(content().string(""));
+    }
+
+    @Test
+    void listRejectsNonMemberBeforeQueryingSubscriptions() throws Exception {
+        when(tenantAccess.requireAccess(TENANT_ID, USER_ID))
+                .thenThrow(new org.springframework.security.access.AccessDeniedException("Tenant access denied"));
+        mockMvc.perform(listRequest(ENDPOINT_ID)).andExpect(status().isForbidden());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void listRejectsAnonymousRequests() throws Exception {
+        mockMvc.perform(listRequest(ENDPOINT_ID).with(anonymous()))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(service, tenantAccess);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "invalid"})
+    void listRejectsMissingOrMalformedTenantHeader(String scenario) throws Exception {
+        var request = listRequest(ENDPOINT_ID);
+        request.headers(headers -> headers.remove("X-Tenant-ID"));
+        if (scenario.equals("invalid")) request.header("X-Tenant-ID", "not-a-uuid");
+        mockMvc.perform(request).andExpect(status().isBadRequest());
+        verifyNoInteractions(service, tenantAccess);
+    }
+
+    @Test
+    void listRejectsMalformedEndpointId() throws Exception {
+        mockMvc.perform(listRequest("not-a-uuid")).andExpect(status().isBadRequest());
+        verifyNoInteractions(service, tenantAccess);
+    }
+
+    private MockHttpServletRequestBuilder listRequest(Object id) {
+        AppUser account = new AppUser("admin@example.com", "unused-test-hash", Instant.parse("2026-11-20T00:00:00Z"));
+        ReflectionTestUtils.setField(account, "id", USER_ID);
+        return get("/api/subscriptions/{id}", id).with(user(new AppUserDetails(account)))
+                .header("X-Tenant-ID", TENANT_ID);
+    }
 
     @Test
     @WithAnonymousUser
