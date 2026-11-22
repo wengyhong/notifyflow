@@ -19,6 +19,8 @@ import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.domain.DeliveryAttempt;
 import com.wenghong.notifyflow.delivery.domain.DeliveryStatus;
 import com.wenghong.notifyflow.delivery.http.WebhookHttpSender;
+import com.wenghong.notifyflow.delivery.observability.DeliveryAttemptOutcome;
+import com.wenghong.notifyflow.delivery.observability.DeliveryMetrics;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryAttemptRepository;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
 import com.wenghong.notifyflow.endpoint.domain.WebhookEndpoint;
@@ -62,11 +64,14 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
@@ -101,6 +106,9 @@ class DeliveryProcessingServiceIntegrationTests {
     @MockitoBean
     private DeliveryRateLimiter rateLimiter;
 
+    @MockitoBean
+    private DeliveryMetrics metrics;
+
     @MockitoSpyBean
     private Clock clock;
 
@@ -133,7 +141,8 @@ class DeliveryProcessingServiceIntegrationTests {
     }
 
     @ParameterizedTest
-    @CsvSource({"204, DELIVERED", "400, FAILED", "503, RETRY_SCHEDULED"})
+    @CsvSource({"199, FAILED", "200, DELIVERED", "204, DELIVERED", "299, DELIVERED",
+            "300, FAILED", "400, FAILED", "503, RETRY_SCHEDULED", "599, RETRY_SCHEDULED"})
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void processSendsOutsideTransactionAndPersistsResponse(
             int responseStatus, DeliveryStatus expectedStatus) throws Exception {
@@ -155,6 +164,8 @@ class DeliveryProcessingServiceIntegrationTests {
 
         verify(sender).send(any(DeliveryWork.class));
         assertProcessOutcome(deliveryId, expectedStatus, responseStatus, null);
+        assertSingleOutcome(responseStatus >= 200 && responseStatus < 300
+                ? DeliveryAttemptOutcome.SUCCESS : DeliveryAttemptOutcome.HTTP_FAILURE);
     }
 
     @Test
@@ -202,6 +213,7 @@ class DeliveryProcessingServiceIntegrationTests {
 
         verify(sender).send(any(DeliveryWork.class));
         assertProcessOutcome(deliveryId, DeliveryStatus.RETRY_SCHEDULED, null, "Connection timed out");
+        assertSingleOutcome(DeliveryAttemptOutcome.IO_FAILURE);
     }
 
     @ParameterizedTest
@@ -216,6 +228,7 @@ class DeliveryProcessingServiceIntegrationTests {
 
         verify(sender).send(any(DeliveryWork.class));
         assertProcessOutcome(deliveryId, DeliveryStatus.RETRY_SCHEDULED, null, "IOException");
+        assertSingleOutcome(DeliveryAttemptOutcome.IO_FAILURE);
     }
 
     @Test
@@ -223,7 +236,7 @@ class DeliveryProcessingServiceIntegrationTests {
     void processSkipsMissingDelivery() throws Exception {
         service.process(UUID.randomUUID());
 
-        verifyNoInteractions(sender);
+        verifyNoInteractions(sender, metrics);
         assertEquals(0L, deliveries.count());
         assertEquals(0L, attempts.count());
     }
@@ -243,7 +256,7 @@ class DeliveryProcessingServiceIntegrationTests {
 
         service.process(delivery.getId());
 
-        verifyNoInteractions(sender);
+        verifyNoInteractions(sender, metrics);
         assertEquals(status, deliveries.findById(delivery.getId()).orElseThrow().getStatus());
         assertEquals(0L, attempts.count());
     }
@@ -271,6 +284,7 @@ class DeliveryProcessingServiceIntegrationTests {
                 deliveries.findById(deliveryId).orElseThrow().getStatus());
         assertEquals(1L, attempts.count());
         assertUnfinishedAttempt(work.getValue());
+        assertSingleOutcome(DeliveryAttemptOutcome.INTERRUPTED);
     }
 
     @Test
@@ -300,6 +314,47 @@ class DeliveryProcessingServiceIntegrationTests {
         assertNull(stored.getFirst().getCompletedAt());
         assertNull(stored.getFirst().getResponseStatus());
         assertNull(stored.getFirst().getErrorMessage());
+        assertSingleOutcome(DeliveryAttemptOutcome.SUCCESS);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void ioFailureStillCountsOnceWhenOutcomePersistenceFails() throws Exception {
+        UUID deliveryId = savePendingDelivery().getId();
+        DataAccessResourceFailureException storageFailure =
+                new DataAccessResourceFailureException("Simulated outcome storage failure");
+        when(sender.send(any(DeliveryWork.class))).thenAnswer(invocation -> {
+            DeliveryWork work = invocation.getArgument(0);
+            doThrow(storageFailure).when(attempts).findById(work.attemptId());
+            throw new IOException("Connection timed out");
+        });
+
+        assertSame(storageFailure, assertThrows(DataAccessResourceFailureException.class,
+                () -> service.process(deliveryId)));
+        assertSingleOutcome(DeliveryAttemptOutcome.IO_FAILURE);
+        assertEquals(DeliveryStatus.PROCESSING, deliveries.findById(deliveryId).orElseThrow().getStatus());
+        assertNull(attempts.findAll().getFirst().getCompletedAt());
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void retryThenSuccessCountsTwoSendsAndDuplicateDeliveredJobCountsNothing() throws Exception {
+        UUID deliveryId = savePendingDelivery().getId();
+        when(sender.send(any(DeliveryWork.class))).thenReturn(503, 204);
+
+        service.process(deliveryId);
+        when(clock.instant()).thenReturn(NOW.plusSeconds(5));
+        service.process(deliveryId);
+        service.process(deliveryId);
+
+        verify(metrics).recordAttempt(eq(DeliveryAttemptOutcome.HTTP_FAILURE),
+                argThat(elapsed -> elapsed != null && !elapsed.isNegative()));
+        verify(metrics).recordAttempt(eq(DeliveryAttemptOutcome.SUCCESS),
+                argThat(elapsed -> elapsed != null && !elapsed.isNegative()));
+        verifyNoMoreInteractions(metrics);
+        verify(sender, times(2)).send(any(DeliveryWork.class));
+        assertEquals(DeliveryStatus.DELIVERED, deliveries.findById(deliveryId).orElseThrow().getStatus());
+        assertEquals(2, attempts.count());
     }
 
     @Test
@@ -322,6 +377,7 @@ class DeliveryProcessingServiceIntegrationTests {
         assertNull(attempt.getResponseStatus());
         assertEquals(1L, deliveries.count());
         assertEquals(1L, attempts.count());
+        verifyNoInteractions(metrics);
     }
 
     @Test
@@ -368,6 +424,7 @@ class DeliveryProcessingServiceIntegrationTests {
         assertNull(attempt.getErrorMessage());
         assertEquals(1L, deliveries.count());
         assertEquals(1L, attempts.count());
+        verifyNoInteractions(metrics);
     }
 
     @Test
@@ -579,7 +636,7 @@ class DeliveryProcessingServiceIntegrationTests {
 
         service.process(first.id());
 
-        verifyNoInteractions(sender);
+        verifyNoInteractions(sender, metrics);
         assertRecordedAttempt(first, 1, DeliveryStatus.RETRY_SCHEDULED, 503, null, 5);
     }
 
@@ -651,7 +708,7 @@ class DeliveryProcessingServiceIntegrationTests {
         verify(rateLimiter).tryAcquire(endpointId);
         verify(attempts, never()).findFirstByDelivery_IdOrderByAttemptNumberDesc(delivery.getId());
         verify(attempts, never()).saveAndFlush(any(DeliveryAttempt.class));
-        verifyNoInteractions(sender);
+        verifyNoInteractions(sender, metrics);
     }
 
     @Test
@@ -762,6 +819,12 @@ class DeliveryProcessingServiceIntegrationTests {
         assertNull(stored.getNextAttemptAt());
         assertEquals(0L, attempts.count());
         verifyNoInteractions(sender);
+    }
+
+    private void assertSingleOutcome(DeliveryAttemptOutcome outcome) {
+        verify(metrics).recordAttempt(eq(outcome),
+                argThat(elapsed -> elapsed != null && !elapsed.isNegative()));
+        verifyNoMoreInteractions(metrics);
     }
 
     private DeliveryWork saveProcessingAttempt(int attemptNumber) {

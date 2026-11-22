@@ -2,6 +2,7 @@ package com.wenghong.notifyflow.delivery.application;
 
 import java.io.IOException;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
@@ -12,13 +13,18 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.domain.DeliveryAttempt;
 import com.wenghong.notifyflow.delivery.http.WebhookHttpSender;
+import com.wenghong.notifyflow.delivery.observability.DeliveryAttemptOutcome;
+import com.wenghong.notifyflow.delivery.observability.DeliveryMetrics;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryAttemptRepository;
 import com.wenghong.notifyflow.delivery.persistence.DeliveryRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.spi.LoggingEventBuilder;
 
 //This service will coordinate loading a delivery, sending its webhook, and recording the outcome. We’ll introduce those operations incrementally, then connect the listener.
 @Service
 public class DeliveryProcessingService {
-
+    private static final Logger log = LoggerFactory.getLogger(DeliveryProcessingService.class);
     private final DeliveryRetryPolicy retryPolicy;
     private final DeliveryRateLimiter rateLimiter;
     private final TransactionTemplate transactions;
@@ -28,11 +34,13 @@ public class DeliveryProcessingService {
     private final DeliveryRepository repository;
     private final Clock clock;
     private final DeliveryAttemptRepository attempts;
+    private final DeliveryMetrics metrics;
 
     public DeliveryProcessingService(DeliveryRepository repository, Clock clock, TransactionTemplate transactions,
             DeliveryAttemptRepository attempts, WebhookHttpSender sender,
             DeliveryRetryPolicy retryPolicy,
-            DeliveryRateLimiter rateLimiter) {
+            DeliveryRateLimiter rateLimiter,
+            DeliveryMetrics metrics) {
         this.repository = repository;
         this.clock = clock;
         this.transactions = transactions;
@@ -40,6 +48,7 @@ public class DeliveryProcessingService {
         this.sender = sender;
         this.retryPolicy = retryPolicy;
         this.rateLimiter = rateLimiter;
+        this.metrics = metrics;
     }
 
     public Optional<DeliveryWork> claim(UUID deliveryId) {
@@ -148,10 +157,20 @@ public class DeliveryProcessingService {
             return;
 
         DeliveryWork work = claimed.get();
+
+        deliveryLog(log.atInfo(), work)
+                .log("Starting webhook send");
         int responseStatus;
+
+        long sendStarted = System.nanoTime();
         try {
             responseStatus = sender.send(work);
         } catch (IOException ioException) {
+
+            metrics.recordAttempt(DeliveryAttemptOutcome.IO_FAILURE, Duration.ofNanos(System.nanoTime() - sendStarted));
+            deliveryLog(log.atWarn(), work)
+                    .addKeyValue("errorType", ioException.getClass().getSimpleName())
+                    .log("Webhook send failed");
             String message = ioException.getMessage();
 
             if (message == null || message.isBlank()) {
@@ -161,11 +180,31 @@ public class DeliveryProcessingService {
             return;
         } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
+
+            metrics.recordAttempt(DeliveryAttemptOutcome.INTERRUPTED,
+                    Duration.ofNanos(System.nanoTime() - sendStarted));
+            deliveryLog(log.atWarn(), work)
+                    .log("Webhook send interrupted");
             throw interruptedException;
         }
 
+        metrics.recordAttempt(
+                responseStatus >= 200 && responseStatus < 300
+                        ? DeliveryAttemptOutcome.SUCCESS
+                        : DeliveryAttemptOutcome.HTTP_FAILURE,
+                Duration.ofNanos(System.nanoTime() - sendStarted));
+
+        deliveryLog(log.atInfo(), work)
+                .addKeyValue("responseStatus", responseStatus)
+                .log("Webhook HTTP response received");
         recordResponse(deliveryId, work.attemptId(), responseStatus);
 
+    }
+
+    private LoggingEventBuilder deliveryLog(LoggingEventBuilder builder, DeliveryWork work) {
+        return builder
+                .addKeyValue("deliveryId", work.id())
+                .addKeyValue("attemptId", work.attemptId());
     }
 
 }

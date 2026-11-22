@@ -17,6 +17,8 @@ import com.wenghong.notifyflow.delivery.domain.Delivery;
 import com.wenghong.notifyflow.delivery.domain.DeliveryAttempt;
 import com.wenghong.notifyflow.delivery.domain.DeliveryStatus;
 import com.wenghong.notifyflow.delivery.http.WebhookHttpSender;
+import com.wenghong.notifyflow.delivery.observability.DeliveryAttemptOutcome;
+import com.wenghong.notifyflow.delivery.observability.DeliveryMetrics;
 import com.wenghong.notifyflow.delivery.messaging.DeliveryJobPublisher;
 import com.wenghong.notifyflow.delivery.messaging.DeliveryRequestedEventListener;
 import com.wenghong.notifyflow.delivery.messaging.outbox.DeliveryOutboxMessage;
@@ -60,6 +62,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -94,6 +98,7 @@ class DeliveryReplayServiceIntegrationTests {
     @MockitoBean private RandomGenerator random;
     @MockitoBean private Clock clock;
     @MockitoBean private DeliveryRateLimiter rateLimiter;
+    @MockitoBean private DeliveryMetrics metrics;
 
     @Autowired private TenantRepository tenants;
     @Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
@@ -331,6 +336,9 @@ class DeliveryReplayServiceIntegrationTests {
         assertEquals(Integer.valueOf(204), sixth.getResponseStatus());
         assertEquals(DeliveryStatus.DELIVERED, deliveries.findById(id).orElseThrow().getStatus());
         assertEquals(6L, attempts.count());
+        verify(metrics).recordAttempt(eq(DeliveryAttemptOutcome.SUCCESS),
+                argThat(elapsed -> elapsed != null && !elapsed.isNegative()));
+        verifyNoMoreInteractions(metrics);
     }
 
     @ParameterizedTest
@@ -396,7 +404,7 @@ class DeliveryReplayServiceIntegrationTests {
         assertEquals(NOW.plusSeconds(1), deferred.getNextAttemptAt());
         assertEquals(6, deferred.getRetryCycleStartAttempt());
         assertEquals(5L, attempts.count());
-        verifyNoInteractions(sender);
+        verifyNoInteractions(sender, metrics);
 
         when(clock.instant()).thenReturn(NOW.plusSeconds(1));
         DeliveryWork work = processing.claim(id).orElseThrow();
