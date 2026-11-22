@@ -1,0 +1,47 @@
+services:
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:4.4-management
+    ports:
+      - "127.0.0.1:25673:5672"
+      - "127.0.0.1:15673:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: notifyflow
+      RABBITMQ_DEFAULT_PASS: ${NOTIFYFLOW_RABBITMQ_PASSWORD:?Set NOTIFYFLOW_RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: notifyflow
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  postgres:
+    image: postgres:18-alpine
+    ports:
+      - "127.0.0.1:5435:5432"
+    environment:
+      POSTGRES_DB: notifyflow
+      POSTGRES_USER: notifyflow
+      POSTGRES_PASSWORD: ${NOTIFYFLOW_DB_PASSWORD:?Set NOTIFYFLOW_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notifyflow -d notifyflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  rabbitmq_data:
+  postgres_data:
