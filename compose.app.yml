@@ -26,7 +26,7 @@ services:
       context: ./frontend
 
     environment:
-      ORIGIN: http://localhost:8088
+      ORIGIN: ${NOTIFYFLOW_PUBLIC_ORIGIN:-http://localhost:8088}
     depends_on:
       backend:
         condition: service_started

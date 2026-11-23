@@ -7,8 +7,9 @@ endpoints, sends signed HTTP requests, and records delivery attempts.
 The project demonstrates transactional messaging, concurrency control, failure
 recovery, tenant isolation, and a dashboard for operating the delivery workflow.
 
-**Status:** local development and GitHub Actions CI are working. Public hosting
-is planned; there is no live demo URL yet.
+**Status:** local development, container builds, and GitHub Actions CI are working.
+An on-demand HTTPS demo through Cloudflare Tunnel is verified. There is no
+permanent, always-on demo URL.
 
 ## What it does
 
@@ -141,6 +142,7 @@ View [CI runs](https://github.com/wengyhong/notifyflow/actions/workflows/ci.yml)
 ## Demo and technical notes
 
 - [Portfolio demo walkthrough and screenshot plan](docs/portfolio-demo.md)
+- [Temporary HTTPS demo with Cloudflare Tunnel](docs/cloudflare-tunnel.md)
 - [Authentication, tenant isolation, and producer keys](docs/authentication.md)
 - [RabbitMQ and dead-letter handling](docs/rabbitmq.md)
 - [Transactional outbox](docs/outbox.md)
@@ -156,9 +158,10 @@ View [CI runs](https://github.com/wengyhong/notifyflow/actions/workflows/ci.yml)
 ## Current scope
 
 This is a portfolio application with Java and Node runtime images, a SvelteKit
-Node adapter, and a Compose gateway verified locally over HTTP. Public HTTPS,
-infrastructure as code, and a hosted environment remain deployment work. The new
-CI image-build steps still need verification on GitHub. Login sessions currently
+Node adapter, and a Compose gateway verified locally over HTTP and through a
+temporary HTTPS tunnel. Backend and frontend image-build checks passed on GitHub.
+Infrastructure as code and an always-on hosted environment remain deployment
+work; the tunnel runs the application on your computer. Login sessions currently
 live in the servlet container; multiple backend replicas would require an explicit
 session strategy. The dashboard refreshes history manually.
 

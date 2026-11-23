@@ -1,0 +1,11 @@
+services:
+  backend:
+    environment:
+      SERVER_FORWARDHEADERSSTRATEGY: framework
+      SERVER_SERVLET_SESSION_COOKIE_SECURE: "true"
+      SERVER_SERVLET_SESSION_COOKIE_HTTPONLY: "true"
+      SERVER_SERVLET_SESSION_COOKIE_SAMESITE: lax
+
+  gateway:
+    volumes:
+      - ./Caddyfile.tunnel:/etc/caddy/Caddyfile:ro

@@ -185,7 +185,9 @@ ordering rather than application readiness checks. A running status alone does
 not prove that login or delivery is ready.
 
 The guided browser check verified login, endpoint listing, and delivery history
-through the gateway. Public HTTPS and Cloudflare Tunnel are not configured yet.
+through the gateway. For the separate temporary public HTTPS configuration, see
+[Cloudflare Tunnel](cloudflare-tunnel.md), including secure-cookie verification
+and how to return to this local HTTP configuration.
 
 Stop the complete stack while preserving its data:
 
