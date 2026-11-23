@@ -232,6 +232,19 @@ checks. The backend image uses Maven's packaged JAR; the frontend image builds
 from source. These steps build but do not push images or deploy the application.
 CI does not require your development `.env` or start the development Compose stack.
 
+## Hosted demo receiver
+
+The optional `demo-receiver` directory contains a separate TypeScript Cloudflare
+Worker. It verifies NotifyFlow's signed requests and returns 204 without requiring
+a receiver process or receiver tunnel on your computer. It is not part of the
+application Compose stack and does not host the NotifyFlow backend.
+
+See its [setup and deployment guide](../demo-receiver/README.md) for local secret
+configuration, the hosted endpoint, publishing a test event, and live logs.
+Its GitHub Actions job runs source/test type checks and 48 tests with a public
+fixture secret; it does not need Cloudflare credentials or deploy the Worker.
+The receiver CI job has not yet been verified on GitHub.
+
 ## Stop infrastructure
 
 Stop the frontend and backend with Ctrl+C in their respective terminals, then run

@@ -8,8 +8,9 @@ The project demonstrates transactional messaging, concurrency control, failure
 recovery, tenant isolation, and a dashboard for operating the delivery workflow.
 
 **Status:** local development, container builds, and GitHub Actions CI are working.
-An on-demand HTTPS demo through Cloudflare Tunnel is verified. There is no
-permanent, always-on demo URL.
+An on-demand HTTPS demo through Cloudflare Tunnel is verified, and a separate
+signature-verifying receiver is deployed on Cloudflare Workers. The full
+application has no permanent, always-on demo URL.
 
 ## What it does
 
@@ -27,6 +28,7 @@ permanent, always-on demo URL.
 - Redis endpoint rate limiting, endpoint caching, and event idempotency caching.
 - Dashboard views for endpoints, subscriptions, producer keys, deliveries, and attempts.
 - Prometheus send counters/timing and delivery logs with correlation identifiers.
+- A hosted TypeScript demo receiver that verifies signatures from the Java sender.
 
 ## Architecture
 
@@ -136,6 +138,8 @@ Backend integration tests use isolated Testcontainers services. Frontend compone
 tests use headless Chromium with mocked API requests. GitHub Actions runs backend
 verification and frontend checks in separate jobs on pushes and pull requests.
 Both jobs include an image build; images are not published or deployed by CI.
+The receiver has a separate job for TypeScript checks and its 48 verification
+tests. The new receiver job still needs verification on GitHub.
 
 View [CI runs](https://github.com/wengyhong/notifyflow/actions/workflows/ci.yml).
 
@@ -143,6 +147,7 @@ View [CI runs](https://github.com/wengyhong/notifyflow/actions/workflows/ci.yml)
 
 - [Portfolio demo walkthrough and screenshot plan](docs/portfolio-demo.md)
 - [Temporary HTTPS demo with Cloudflare Tunnel](docs/cloudflare-tunnel.md)
+- [Hosted receiver: setup, signature verification, deployment, and logs](demo-receiver/README.md)
 - [Authentication, tenant isolation, and producer keys](docs/authentication.md)
 - [RabbitMQ and dead-letter handling](docs/rabbitmq.md)
 - [Transactional outbox](docs/outbox.md)
@@ -161,7 +166,9 @@ This is a portfolio application with Java and Node runtime images, a SvelteKit
 Node adapter, and a Compose gateway verified locally over HTTP and through a
 temporary HTTPS tunnel. Backend and frontend image-build checks passed on GitHub.
 Infrastructure as code and an always-on hosted environment remain deployment
-work; the tunnel runs the application on your computer. Login sessions currently
+work; the tunnel runs the application on your computer. The hosted demo receiver
+runs independently on Cloudflare and acknowledges verified requests without a
+durable inbox or deduplication. Login sessions currently
 live in the servlet container; multiple backend replicas would require an explicit
 session strategy. The dashboard refreshes history manually.
 

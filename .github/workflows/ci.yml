@@ -66,3 +66,34 @@ jobs:
 
       - name: Build frontend container image
         run: docker build -t notifyflow-frontend:ci .
+
+  receiver:
+    name: Demo receiver
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: demo-receiver
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: demo-receiver/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check receiver types
+        run: npx tsc --noEmit
+
+      - name: Check test types
+        run: npx tsc --noEmit -p test/tsconfig.json
+
+      - name: Test receiver
+        run: npm test -- --run

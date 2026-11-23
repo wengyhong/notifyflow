@@ -4,6 +4,12 @@ Use this guide to record a short demonstration or present the project locally.
 Screenshots and a recording are planned artifacts, not included media yet.
 Use disposable demo data and keep real credentials out of captures.
 
+For a hosted signature-verification demonstration, use the
+[Cloudflare Worker receiver](../demo-receiver/README.md). Its signed 204 response,
+unsigned 401 response, and correlated live log were verified. It always returns
+204 for valid requests, so use the controllable receiver below for deliberate
+failures, retries, and replay. Screenshots and recordings remain deferred.
+
 For the containerized backend, use the
 [receiver tunnel walkthrough](cloudflare-tunnel.md#deliver-from-the-backend-container-to-a-local-receiver).
 It documents verified 204 delivery, automatic retry from 503 to 204, and manual

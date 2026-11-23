@@ -54,13 +54,22 @@ a recording remain deferred.
 
 ## Remaining verification for a permanent deployment
 
+The separate [Cloudflare Worker receiver](../demo-receiver/README.md) was also
+deployed and verified on 2026-11-23: unsigned POST returned 401, a signed NotifyFlow
+delivery returned 204, and live Worker logs showed the matching delivery ID.
+Its 48 local tests include independent Java signer reference vectors, timestamp
+boundaries, tamper rejection, and rotation candidates. The new receiver CI job
+still needs a GitHub run. The Worker has no durable deduplication or business
+processing, and deploying it does not host the main application.
+
 1. Select an always-on deployment topology if desired, document its costs/limits,
    and define infrastructure as code and teardown procedures.
 2. Add application readiness checks and image publishing for the chosen host.
 3. Repeat HTTPS/session checks and verify tenant isolation and producer key revocation
    in that environment.
-4. Verify signatures at the receiver, outbox recovery during broker outages,
-   receiver deduplication, and recovery after worker termination.
+4. Repeat signature checks in the final environment; verify outbox recovery during
+   broker outages, durable receiver deduplication if required, and recovery after
+   worker termination.
 5. Verify private infrastructure/management access, restart behavior, and data restore.
 6. Record a stable demo URL only if one is provisioned; capture screenshots and a recording later.
 

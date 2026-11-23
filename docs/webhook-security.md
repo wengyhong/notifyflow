@@ -23,6 +23,13 @@ same text for signing and sending.
 
 ## Receiver verification
 
+The repository also includes a [hosted TypeScript receiver](../demo-receiver/README.md)
+on Cloudflare Workers. It verifies this signing protocol against exact request
+bytes, rejects timestamps outside the five-minute window, and accepts matching
+signature candidates during rotation overlap. Its 48 tests include the Java
+signer's fixed reference vectors. Unlike the standalone deduplicating receiver
+described below, this Worker does not persist delivery IDs or suppress duplicates.
+
 The receiver walkthrough was first recorded before account authentication was
 added. For current API calls, prepare a session, CSRF token, and tenant header
 using [authentication](authentication.md#local-verification-with-powershell).

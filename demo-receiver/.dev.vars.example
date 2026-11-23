@@ -1,0 +1,3 @@
+# Public test fixture for local development only.
+# Configure the real endpoint secret in Cloudflare using Wrangler.
+WEBHOOK_SIGNING_SECRET="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="

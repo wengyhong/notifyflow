@@ -5,6 +5,11 @@ your computer. Cloudflare provides the public HTTPS entry point; `cloudflared`
 maintains an outbound tunnel to the local Caddy gateway. This is an on-demand
 demo, not an always-on cloud deployment.
 
+The [hosted Cloudflare Worker receiver](../demo-receiver/README.md) is now available
+for signature-verifying delivery demonstrations without running a receiver tunnel.
+The separate receiver tunnel below remains useful for controlling 400/503 responses
+when demonstrating retry and replay. Hosting the receiver does not host NotifyFlow.
+
 ```text
 Browser -> HTTPS :443 -> Cloudflare -> tunnel -> cloudflared
     -> HTTP localhost:8088 -> Caddy :80
