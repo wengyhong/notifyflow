@@ -43,14 +43,26 @@ on-demand local demo with a recording remains an option if an always-on deployme
 cannot meet the budget without removing core behavior. See the
 [tunnel setup and shutdown guide](cloudflare-tunnel.md) for the current demo.
 
-## Remaining verification
+## Verified container delivery checkpoint
 
-1. Select a deployment topology and document its limits and teardown process.
-2. Implement deployment configuration and runtime packaging in guided steps.
-3. Verify HTTPS login/logout, CSRF, tenant isolation, and producer key revocation.
-4. Verify signed delivery, retry, replay, outbox recovery, and receiver deduplication.
+On 2026-11-23, the user verified the containerized backend delivering through a
+separate HTTPS receiver tunnel: HTTP 204 success, automatic retry from 503 to 204,
+and manual replay from 400/FAILED to 204/DELIVERED while retaining delivery identity
+and attempt history. See the [reproducible walkthrough](cloudflare-tunnel.md#deliver-from-the-backend-container-to-a-local-receiver).
+The receiver did not validate signatures or deduplicate requests. Screenshots and
+a recording remain deferred.
+
+## Remaining verification for a permanent deployment
+
+1. Select an always-on deployment topology if desired, document its costs/limits,
+   and define infrastructure as code and teardown procedures.
+2. Add application readiness checks and image publishing for the chosen host.
+3. Repeat HTTPS/session checks and verify tenant isolation and producer key revocation
+   in that environment.
+4. Verify signatures at the receiver, outbox recovery during broker outages,
+   receiver deduplication, and recovery after worker termination.
 5. Verify private infrastructure/management access, restart behavior, and data restore.
-6. Record the actual public demo URL and capture screenshots only after deployment works.
+6. Record a stable demo URL only if one is provisioned; capture screenshots and a recording later.
 
 See [local development](local-development.md), [authentication](authentication.md),
 [webhook security](webhook-security.md), and [observability](observability.md) for

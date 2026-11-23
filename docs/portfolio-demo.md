@@ -4,6 +4,12 @@ Use this guide to record a short demonstration or present the project locally.
 Screenshots and a recording are planned artifacts, not included media yet.
 Use disposable demo data and keep real credentials out of captures.
 
+For the containerized backend, use the
+[receiver tunnel walkthrough](cloudflare-tunnel.md#deliver-from-the-backend-container-to-a-local-receiver).
+It documents verified 204 delivery, automatic retry from 503 to 204, and manual
+replay from 400 to 204. The host-based receiver setup below uses the local Spring
+profile; a loopback endpoint does not point to your computer from inside Docker.
+
 ## Prepare
 
 1. Follow [local development](local-development.md) to start infrastructure,
