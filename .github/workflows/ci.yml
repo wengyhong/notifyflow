@@ -27,6 +27,9 @@ jobs:
       - name: Build and test backend
         run: bash ./mvnw --batch-mode --no-transfer-progress clean verify
 
+      - name: Build backend container image
+        run: docker build -t notifyflow-backend:ci .
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -60,3 +63,6 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+      - name: Build frontend container image
+        run: docker build -t notifyflow-frontend:ci .
