@@ -27,6 +27,8 @@ application has no permanent, always-on demo URL.
   address checks at registration and connection time.
 - Redis endpoint rate limiting, endpoint caching, and event idempotency caching.
 - Dashboard views for endpoints, subscriptions, producer keys, deliveries, and attempts.
+- Session-authenticated test event publishing from the dashboard, with JSON validation
+  and explicit idempotency-key reuse.
 - Prometheus send counters/timing and delivery logs with correlation identifiers.
 - A hosted TypeScript demo receiver that verifies signatures from the Java sender.
 

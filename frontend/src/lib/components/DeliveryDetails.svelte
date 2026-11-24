@@ -4,11 +4,12 @@
 	import { getCsrfToken } from '#lib/api/csrf.ts';
 	import type { Delivery, DeliveryAttemptPage } from '#lib/types/delivery.ts';
 
-	let { tenantId, deliveryId, canReplay, onReplayed }: {
+	let { tenantId, deliveryId, canReplay, onReplayed, embedded = false }: {
 		tenantId: string;
 		deliveryId: string;
 		canReplay: boolean;
 		onReplayed: () => Promise<void>;
+		embedded?: boolean;
 	} = $props();
 
 	let delivery = $state<Delivery | null>(null);
@@ -98,8 +99,8 @@
 	}
 </script>
 
-<section class="details-panel" aria-labelledby="delivery-details-heading">
-  <div class="section-heading"><div><h3 id="delivery-details-heading">Delivery details</h3><code>{deliveryId}</code></div><button class="button--small" type="button" disabled={loading || replaying} onclick={() => loadDetails(attemptPage?.page ?? 0)}><Icon name="refresh" size={13} />Refresh</button></div>
+<section class="details-panel" class:details-panel--embedded={embedded} aria-labelledby={embedded ? undefined : 'delivery-details-heading'} aria-label={embedded ? 'Delivery details' : undefined}>
+  <div class="section-heading"><div>{#if !embedded}<h3 id="delivery-details-heading">Delivery details</h3>{/if}<code>{deliveryId}</code></div><button class="button--small" type="button" disabled={loading || replaying} onclick={() => loadDetails(attemptPage?.page ?? 0)}><Icon name="refresh" size={13} />Refresh</button></div>
   <p role="status">{message}</p><p role="status">{replayMessage}</p>
   {#if delivery}
     <dl class="details-grid">

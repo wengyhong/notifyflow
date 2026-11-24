@@ -64,6 +64,22 @@ when demonstrating HMAC verification, tamper rejection, and secret rotation.
 
 ## Submit a successful event
 
+For a terminal-free demonstration, sign in as a workspace administrator and click
+Send test event in the dashboard header. Enter the event type subscribed to by
+your receiver (for this guide, `portfolio.order.created`) and a payload such as
+`{"orderId":128}`. Keep the generated idempotency key and click Send event.
+The accepted event ID is shown; View delivery history closes the panel and moves
+to the refreshed history. Wait for the actual delivery outcome rather than
+treating acceptance as successful delivery.
+
+For the hosted Worker receiver, use `hosted.receiver.demo` instead and follow its
+[secret setup instructions](../demo-receiver/README.md). To demonstrate idempotency,
+send the same content with the same key; to create another event for a retry or
+replay scenario, click New key before sending. Changing content while keeping a
+used key should return a conflict. The panel uses the logged-in session and does
+not require a producer key. The PowerShell flow below remains useful when
+demonstrating the separate producer API.
+
 In another PowerShell terminal, read the producer key without displaying it:
 
 ```powershell

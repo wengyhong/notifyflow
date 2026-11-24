@@ -134,7 +134,12 @@ curl.exe -s -o NUL -w "%{http_code}" -X POST `
 ```
 
 Expect 401. Next, add the subscription `hosted.receiver.demo` to the matching
-NotifyFlow endpoint. Create or use a producer key from the same workspace.
+NotifyFlow endpoint. For a dashboard-only demonstration, click Send test event,
+enter that event type and a sample JSON payload, and click Send event. Use New key
+when intentionally sending another event. View delivery history shows the refreshed
+list, where the delivery should eventually reach HTTP 204.
+
+For the producer API demonstration below, create or use a producer key from the same workspace.
 With NotifyFlow running in its regular local HTTP gateway mode, publish:
 
 ```powershell

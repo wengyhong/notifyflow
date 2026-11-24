@@ -33,7 +33,7 @@ Checkpoint verification on 2026-11-22: backend `mvn -o clean verify` passed all
 and database tests for session identity, workspace membership isolation, lazy
 relationship mapping, and empty memberships.
 
-The 70 automated frontend tests run across 13 files with mocked requests.
+The 104 automated frontend tests run across 14 files with mocked requests.
 `npm run check` reports no errors or warnings, and `npm run build` passes.
 The development proxy targets Spring Boot on port 7829. Production adapter/API
 proxy deployment is a later deployment task; user sessions currently live in
@@ -71,7 +71,7 @@ with NotifyFlow tests. Type checking remains available with `npm run check`.
 ## NotifyFlow visual layout
 
 Shared styles live in `src/app.css`, imported by the root layout. The interface
-uses a green workspace sidebar, endpoint cards, delivery/key tables, semantic
+uses a green workspace sidebar, compact endpoint/delivery/key tables, semantic
 status badges, and responsive layouts. Sidebar links jump to the existing
 sections without replacing the selected workspace or unmounting their forms.
 
@@ -79,6 +79,52 @@ sections without replacing the selected workspace or unmounting their forms.
 gives login and registration a shared two-column layout that stacks on smaller
 screens. Fonts use DM Sans and Manrope from Google Fonts with local fallbacks.
 No UI framework dependencies were added.
+
+### Compact endpoint management
+
+Endpoints appear as compact rows with name, truncated destination, status, and a
+Manage action. The full destination and endpoint ID are available in a native
+dialog side panel, with copy buttons and a manual-copy fallback message if clipboard
+access fails. Subscriptions load only for the selected endpoint and are displayed
+directly, alongside administrator-only enable/disable and signing-secret rotation
+controls. Viewers can open the same panel without mutation controls.
+
+The New endpoint button opens creation in the panel instead of reserving permanent
+space beside the list. Closing the panel or changing workspace unmounts forms and
+clears displayed secrets. The dialog supports Escape, focus containment, focus
+return, and a full-width mobile layout. Pagination and tenant-scoped API requests
+are preserved. Tests cover these flows, including clipboard failures and workspace
+changes while a secret is displayed.
+
+Delivery history uses the same `SidePanel` dialog. View details opens delivery
+metadata, HTTP attempt history, attempt pagination, refresh, and authorized replay
+without expanding content beneath the list. Replay keeps the panel open and updates
+the details and history; closing it returns to the compact list. Changing the
+workspace or status filter clears the selected delivery. Tests cover replay and
+pagination inside the panel, keyboard dismissal/focus return, and delayed responses
+from a previously selected workspace.
+
+### Send test events
+
+Workspace administrators can use Send test event in the dashboard header. The side
+panel accepts an event type, non-null JSON payload, and an automatically generated,
+editable idempotency key. It posts to `/api/events` using the session, selected
+tenant, and shared CSRF helper; no producer key is requested by the UI.
+
+The JSON is validated locally and its original payload text is sent to avoid
+rounding large numeric literals. A successful 202 response displays the accepted
+event ID/type/time and refreshes delivery history on its first page with all
+statuses. View delivery history closes the panel and focuses that section.
+Acceptance is not a delivery guarantee: subscriptions determine whether an event
+creates deliveries, and workers send asynchronously.
+
+The key remains unchanged after a send or network failure. Reusing it with matching
+content returns the existing event; conflicting content produces a 409 explanation.
+New key explicitly generates a different key for a new event. The panel clears
+form/result state when closed or when the workspace changes, and ignores stale
+responses. These are real events delivered to matching enabled endpoints, so use
+sample payloads for demonstrations. Viewers do not see the publishing action, and
+the existing backend administrator check still enforces authorization.
 
 Mobile layouts keep logout accessible, stack forms/cards, and let tables scroll
 within their containers. Keyboard focus indicators, a skip link, and reduced

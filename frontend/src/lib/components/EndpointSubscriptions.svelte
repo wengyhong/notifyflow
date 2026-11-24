@@ -2,10 +2,11 @@
 	import CreateSubscriptionForm from '#lib/components/CreateSubscriptionForm.svelte';
 	import type { WebhookSubscription } from '#lib/types/webhook-subscription.ts';
 
-	let { tenantId, endpointId, canManage }: {
+	let { tenantId, endpointId, canManage, embedded = false }: {
 		tenantId: string;
 		endpointId: string;
 		canManage: boolean;
+		embedded?: boolean;
 	} = $props();
 
 	let open = $state(false);
@@ -15,7 +16,7 @@
 	let latestRequestId = 0;
 
 	$effect(() => {
-		if (open) void loadSubscriptions();
+		if (embedded || open) void loadSubscriptions();
 	});
 
 	async function loadSubscriptions() {
@@ -52,8 +53,7 @@
 	}
 </script>
 
-<details bind:open>
-  <summary>Event subscriptions</summary>
+{#snippet content()}
   <button class="button--small" type="button" onclick={loadSubscriptions} disabled={loading}>Refresh subscriptions</button>
   <p role="status">{message}</p>
   {#if subscriptions}
@@ -63,4 +63,16 @@
     </ul>
   {/if}
   {#if canManage}<CreateSubscriptionForm {tenantId} {endpointId} onCreated={loadSubscriptions} />{/if}
-</details>
+{/snippet}
+
+{#if embedded}
+  <section class="endpoint-panel-section" aria-label="Event subscriptions">
+    <h3>Event subscriptions</h3>
+    {@render content()}
+  </section>
+{:else}
+  <details bind:open>
+    <summary>Event subscriptions</summary>
+    {@render content()}
+  </details>
+{/if}
