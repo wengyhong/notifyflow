@@ -2,9 +2,10 @@
 	import { getCsrfToken } from '#lib/api/csrf.ts';
 	import type { WebhookSecretRotated } from '#lib/types/webhook-endpoint.ts';
 
-	let { tenantId, endpointId }: {
+	let { tenantId, endpointId, embedded = false }: {
 		tenantId: string;
 		endpointId: string;
+		embedded?: boolean;
 	} = $props();
 
 	let submitting = $state(false);
@@ -60,12 +61,23 @@
 	}
 </script>
 
-<details>
-  <summary>Signing secret rotation</summary>
+{#snippet content()}
   <p>Create a new signing secret, then update your receiver during the one-hour overlap.</p>
   <button class="button--small" type="button" onclick={rotateSecret} disabled={submitting}>{submitting ? 'Rotating...' : 'Rotate signing secret'}</button>
   <p role="status">{message}</p>
   {#if rotation}
     <div class="secret-box"><h4>Your new signing secret</h4><p>Save this secret for your webhook receiver.</p><code>{rotation.signingSecret}</code><p>Previous secret expires: <time datetime={rotation.previousSigningSecretExpiresAt}>{new Date(rotation.previousSigningSecretExpiresAt).toLocaleString()}</time></p><button type="button" class="button--small" onclick={() => rotation = null}>Hide secret</button></div>
   {/if}
-</details>
+{/snippet}
+
+{#if embedded}
+  <section class="endpoint-panel-section" aria-label="Signing secret rotation">
+    <h3>Signing secret rotation</h3>
+    {@render content()}
+  </section>
+{:else}
+  <details>
+    <summary>Signing secret rotation</summary>
+    {@render content()}
+  </details>
+{/if}

@@ -1,0 +1,21 @@
+(tunnel_headers) {
+    header_up -Forwarded
+    header_up -X-Forwarded-Prefix
+    header_up -X-Forwarded-Ssl
+    header_up X-Forwarded-Proto https
+    header_up X-Forwarded-Port 443
+}
+
+:80 {
+    handle /api/* {
+        reverse_proxy backend:8080 {
+            import tunnel_headers
+        }
+    }
+
+    handle {
+        reverse_proxy frontend:3000 {
+            import tunnel_headers
+        }
+    }
+}
